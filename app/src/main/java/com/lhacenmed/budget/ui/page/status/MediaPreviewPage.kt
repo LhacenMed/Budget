@@ -2,8 +2,12 @@ package com.lhacenmed.budget.ui.page.status
 
 import android.content.Intent
 import android.view.ViewGroup
-import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -20,6 +24,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
@@ -32,12 +37,22 @@ fun MediaPreviewScreen(
     onBack:   () -> Unit,
     onSave:   () -> Unit
 ) {
-    var showInfo by remember { mutableStateOf(false) }
-    val context  = LocalContext.current
+    var showControls by remember { mutableStateOf(true) }
+    var showInfo     by remember { mutableStateOf(false) }
+    val context      = LocalContext.current
 
-    BackHandler(onBack = onBack)
+    // No BackHandler needed — the NavHost handles the back gesture automatically
+    // and fires the shared axis exit animation via popExitTransition in animatedComposable.
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .clickable(
+                indication        = null,
+                interactionSource = remember { MutableInteractionSource() }
+            ) { showControls = !showControls }
+    ) {
 
         // ── Media ─────────────────────────────────────────────────────────────
         if (item.isVideo) {
@@ -51,73 +66,86 @@ fun MediaPreviewScreen(
             )
         }
 
-        // ── Top bar ───────────────────────────────────────────────────────────
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.TopStart)
-                .background(Color.Black.copy(alpha = 0.45f))
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // ── Top controls (tap anywhere to toggle) ─────────────────────────────
+        AnimatedVisibility(
+            visible  = showControls,
+            enter    = fadeIn(),
+            exit     = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .statusBarsPadding()
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint               = Color.White
+                    )
+                }
+                Text(
+                    text     = item.name,
+                    color    = Color.White,
+                    style    = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f).padding(end = 8.dp),
+                    maxLines = 1
+                )
             }
-            Text(
-                text  = item.name,
-                color = Color.White,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f).padding(end = 8.dp),
-                maxLines = 1
-            )
         }
 
-        // ── Bottom action bar ─────────────────────────────────────────────────
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .background(Color.Black.copy(alpha = 0.45f))
-                .navigationBarsPadding()
-                .padding(vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
+        // ── Bottom controls ───────────────────────────────────────────────────
+        AnimatedVisibility(
+            visible  = showControls,
+            enter    = fadeIn(),
+            exit     = fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
         ) {
-            // Save
-            ActionButton(
-                icon    = Icons.Default.Download,
-                label   = "Save",
-                loading = isSaving,
-                onClick = onSave
-            )
-            // Share
-            ActionButton(
-                icon  = Icons.Default.Share,
-                label = "Share",
-                onClick = {
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type  = if (item.isVideo) "video/*" else "image/*"
-                        putExtra(Intent.EXTRA_STREAM, item.uri)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .navigationBarsPadding()
+                    .padding(vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                ActionButton(
+                    icon    = Icons.Default.Download,
+                    label   = "Save",
+                    loading = isSaving,
+                    onClick = onSave
+                )
+                ActionButton(
+                    icon    = Icons.Default.Share,
+                    label   = "Share",
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = if (item.isVideo) "video/*" else "image/*"
+                            putExtra(Intent.EXTRA_STREAM, item.uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        context.startActivity(Intent.createChooser(intent, "Share via"))
                     }
-                    context.startActivity(Intent.createChooser(intent, "Share via"))
-                }
-            )
-            // Info
-            ActionButton(
-                icon  = Icons.Default.Info,
-                label = "Info",
-                onClick = { showInfo = true }
-            )
+                )
+                ActionButton(
+                    icon    = Icons.Default.Info,
+                    label   = "Info",
+                    onClick = { showInfo = true }
+                )
+            }
         }
     }
 
-    // ── Info dialog ───────────────────────────────────────────────────────────
     if (showInfo) {
         AlertDialog(
             onDismissRequest = { showInfo = false },
-            title   = { Text("File Info") },
-            text    = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            title            = { Text("File Info") },
+            text             = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     InfoRow("Name", item.name)
                     InfoRow("Type", if (item.isVideo) "Video" else "Image")
                 }
@@ -129,8 +157,9 @@ fun MediaPreviewScreen(
     }
 }
 
-// ── Video player (ExoPlayer) ──────────────────────────────────────────────────
+// ── Video player ──────────────────────────────────────────────────────────────
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 private fun VideoPlayer(uri: android.net.Uri, modifier: Modifier) {
     val context = LocalContext.current
@@ -147,9 +176,10 @@ private fun VideoPlayer(uri: android.net.Uri, modifier: Modifier) {
         modifier = modifier,
         factory  = {
             PlayerView(it).apply {
-                this.player  = player
+                this.player   = player
                 useController = true
-                layoutParams = ViewGroup.LayoutParams(
+                setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                layoutParams  = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
@@ -158,25 +188,26 @@ private fun VideoPlayer(uri: android.net.Uri, modifier: Modifier) {
     )
 }
 
-// ── Small helpers ─────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun ActionButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
+    icon:    androidx.compose.ui.graphics.vector.ImageVector,
+    label:   String,
     loading: Boolean = false,
     onClick: () -> Unit
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         if (loading) {
             LoadingIndicator(
-                modifier    = Modifier.size(24.dp).padding(bottom = 4.dp),
-                color       = Color.White
+                modifier = Modifier.size(40.dp).padding(bottom = 4.dp),
+                color    = Color.White
             )
         } else {
-            IconButton(onClick = onClick) {
-                Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(26.dp))
+            IconButton(onClick = onClick, modifier = Modifier.size(40.dp)) {
+                Icon(icon, contentDescription = label, tint = Color.White,
+                    modifier = Modifier.size(24.dp))
             }
         }
         Text(label, color = Color.White, style = MaterialTheme.typography.labelSmall)
@@ -186,7 +217,9 @@ private fun ActionButton(
 @Composable
 private fun InfoRow(label: String, value: String) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, style = MaterialTheme.typography.bodySmall)
     }
 }

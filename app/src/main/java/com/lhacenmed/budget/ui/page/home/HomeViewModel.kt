@@ -4,7 +4,9 @@ import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lhacenmed.budget.data.local.PendingSpendingItem
 import com.lhacenmed.budget.data.model.BudgetContribution
+import com.lhacenmed.budget.data.model.DisplaySpendingItem
 import com.lhacenmed.budget.data.model.SpendingItem
 import com.lhacenmed.budget.data.repository.SpendingRepository
 import com.lhacenmed.budget.data.util.ConnectivityObserver
@@ -26,8 +28,8 @@ import javax.inject.Inject
 data class HomeUiState(
     val days: List<String> = emptyList(),
     val selectedDay: String = LocalDate.now().toString(),
-    val items: List<SpendingItem> = emptyList(),
-    val allSpending: List<SpendingItem> = emptyList(),
+    val items: List<DisplaySpendingItem> = emptyList(),   // synced + pending merged
+    val allSpending: List<SpendingItem> = emptyList(),    // synced only (history page)
     val contributions: List<BudgetContribution> = emptyList(),
     val totalBudget: Float = 0f,
     val totalSpent: Float = 0f,
@@ -40,6 +42,7 @@ data class HomeUiState(
     val error: String? = null
 ) {
     val remaining get() = totalBudget - totalSpent
+    // daySpent includes pending items so the summary is accurate offline
     val daySpent  get() = items.sumOf { it.price.toDouble() }.toFloat()
 }
 
@@ -57,30 +60,28 @@ class HomeViewModel @Inject constructor(
     init {
         loadCurrentUser()
         viewModelScope.launch {
-            // 1. Instant cache — UI populated before any network call
+            // 1. Instant cache load
             val (cached, cachedContributions) = repository.getCachedSnapshot()
             if (cached.isNotEmpty() || cachedContributions.isNotEmpty()) {
                 applyData(cached, cachedContributions)
             }
-
-            // 2. Read current connectivity state once (no subscription yet).
-            //    If online, drain any pending items that were queued while offline.
-            //    This is the fix: syncPending must run on every online startup, not
-            //    just on offline→online transitions observed after the app is running.
+            // 2. Read connectivity once and sync pending queue if online
             val isOnlineNow = connectivity.isOnline.first()
             _state.update { it.copy(isOnline = isOnlineNow) }
             if (isOnlineNow) repository.syncPending()
-
             // 3. Background network fetch
             fetchFromNetwork()
         }
         observeConnectivity()
     }
 
+    // ── Public API ────────────────────────────────────────────────────────────
+
     fun refresh() = viewModelScope.launch { fetchFromNetwork() }
 
-    fun selectDay(date: String) {
-        _state.update { it.copy(selectedDay = date, items = it.allSpending.itemsFor(date)) }
+    fun selectDay(date: String) = viewModelScope.launch {
+        _state.update { it.copy(selectedDay = date) }
+        loadDisplayItemsForDay(date)
     }
 
     fun addItem(name: String, quantity: String?, price: Float, description: String?) = viewModelScope.launch {
@@ -92,21 +93,45 @@ class HomeViewModel @Inject constructor(
             price       = price,
             description = description?.takeIf { it.isNotBlank() }
         )
-        runCatching { repository.addItem(item) }
-            .onSuccess { if (_state.value.isOnline) refresh() else updatePendingCount() }
-            .onFailure { e -> _state.update { it.copy(error = e.message) } }
+        // Always inserts to Room queue first; Supabase may succeed or fail.
+        // Either way the item appears immediately in the list as pending.
+        repository.addItem(item)
+        loadDisplayItemsForDay(_state.value.selectedDay)
+        updatePendingCount()
+        if (_state.value.isOnline) refresh()
     }
 
     fun addContribution(amount: Float) = viewModelScope.launch {
-        val contribution = BudgetContribution(contributor = _state.value.currentUserName, amount = amount)
+        val contribution = BudgetContribution(
+            contributor = _state.value.currentUserName,
+            amount      = amount
+        )
         runCatching { repository.addContribution(contribution) }
-            .onSuccess { refresh() }
-            .onFailure { e -> _state.update { it.copy(error = e.message) } }
+            .onSuccess  { refresh() }
+            .onFailure  { e -> _state.update { it.copy(error = e.message) } }
     }
 
-    fun deleteItem(id: String) = viewModelScope.launch {
-        runCatching { repository.deleteItem(id) }
-            .onSuccess { refresh() }
+    fun deleteItem(item: DisplaySpendingItem) = viewModelScope.launch {
+        if (item.isPending && item.localId != null) {
+            // Cancel queued pending item — remove from Room without sending
+            repository.deletePending(item.localId)
+            loadDisplayItemsForDay(_state.value.selectedDay)
+            updatePendingCount()
+        } else if (item.serverId.isNotBlank()) {
+            runCatching { repository.deleteItem(item.serverId) }
+                .onSuccess { refresh() }
+        }
+    }
+
+    fun retryItem(localId: Int) = viewModelScope.launch {
+        val success = repository.retryItem(localId)
+        if (success) {
+            refresh() // pull fresh data including the server-assigned id
+        } else {
+            loadDisplayItemsForDay(_state.value.selectedDay)
+            _state.update { it.copy(error = "Retry failed — check your connection.") }
+        }
+        updatePendingCount()
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
@@ -149,9 +174,14 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    private fun applyData(spending: List<SpendingItem>, contributions: List<BudgetContribution>) {
-        val today = LocalDate.now().toString()
-        val days  = (listOf(today) + spending.map { it.date }.distinct().sortedDescending()).distinct()
+    private suspend fun applyData(
+        spending:      List<SpendingItem>,
+        contributions: List<BudgetContribution>
+    ) {
+        val today       = LocalDate.now().toString()
+        val days        = (listOf(today) + spending.map { it.date }.distinct().sortedDescending()).distinct()
+        val selectedDay = _state.value.selectedDay
+
         _state.update { current ->
             current.copy(
                 days          = days,
@@ -159,13 +189,19 @@ class HomeViewModel @Inject constructor(
                 contributions = contributions,
                 totalBudget   = contributions.sumOf { it.amount.toDouble() }.toFloat(),
                 totalSpent    = spending.sumOf { it.price.toDouble() }.toFloat(),
-                items         = spending.itemsFor(current.selectedDay),
                 isLoading     = false,
                 isRefreshing  = false,
                 error         = null
             )
         }
+        loadDisplayItemsForDay(selectedDay)
         updatePendingCount()
+    }
+
+    private suspend fun loadDisplayItemsForDay(date: String) {
+        val synced  = _state.value.allSpending.filter { it.date == date }.sortedBy { it.createdAt }
+        val pending = repository.getPendingForDay(date)
+        _state.update { it.copy(items = synced.map { s -> s.toDisplay() } + pending.map { p -> p.toDisplay() }) }
     }
 
     private fun updatePendingCount() = viewModelScope.launch {
@@ -173,5 +209,26 @@ class HomeViewModel @Inject constructor(
     }
 }
 
-private fun List<SpendingItem>.itemsFor(date: String) =
-    filter { it.date == date }.sortedBy { it.createdAt }
+// ── Mappers ───────────────────────────────────────────────────────────────────
+
+private fun SpendingItem.toDisplay() = DisplaySpendingItem(
+    serverId    = id,
+    date        = date,
+    shopper     = shopper,
+    name        = name,
+    quantity    = quantity,
+    price       = price,
+    description = description,
+    isPending   = false
+)
+
+private fun PendingSpendingItem.toDisplay() = DisplaySpendingItem(
+    localId     = localId,
+    date        = date,
+    shopper     = shopper,
+    name        = name,
+    quantity    = quantity,
+    price       = price,
+    description = description,
+    isPending   = true
+)

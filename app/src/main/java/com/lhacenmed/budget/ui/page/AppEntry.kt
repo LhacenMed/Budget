@@ -1,5 +1,6 @@
 package com.lhacenmed.budget.ui.page
 
+import android.annotation.SuppressLint
 import android.os.Build
 import android.util.TypedValue
 import androidx.activity.compose.BackHandler
@@ -46,10 +47,12 @@ import com.lhacenmed.budget.ui.page.home.AddFundsSheet
 import com.lhacenmed.budget.ui.page.home.AddSpendingSheet
 import com.lhacenmed.budget.ui.page.home.HomeContent
 import com.lhacenmed.budget.ui.page.home.HomeViewModel
+import com.lhacenmed.budget.ui.page.status.MediaPreviewScreen
 import com.lhacenmed.budget.ui.page.status.StatusContent
 import com.lhacenmed.budget.ui.page.status.StatusViewModel
 import kotlinx.coroutines.launch
 
+@SuppressLint("UnrememberedGetBackStackEntry")
 @RequiresApi(Build.VERSION_CODES.Q)
 @Composable
 fun AppEntry() {
@@ -59,6 +62,7 @@ fun AppEntry() {
             MainScreen(
                 onNavigateToBudgetHistory = { navController.navigate(Route.BUDGET_HISTORY) },
                 onNavigateToAppearance    = { navController.navigate(Route.APPEARANCE) },
+                onNavigateToStatusPreview = { navController.navigate(Route.STATUS_PREVIEW) },
             )
         }
         animatedComposable(Route.BUDGET_HISTORY) {
@@ -73,6 +77,23 @@ fun AppEntry() {
         animatedComposable(Route.DARK_THEME) {
             DarkThemePage(onNavigateBack = { navController.popBackStack() })
         }
+        animatedComposable(Route.STATUS_PREVIEW) {
+            val homeEntry = remember(navController) { navController.getBackStackEntry(Route.HOME) }
+            val statusViewModel: StatusViewModel = hiltViewModel(homeEntry)
+            val state by statusViewModel.state.collectAsStateWithLifecycle()
+            val item  = remember { state.previewItem } ?: return@animatedComposable
+
+            DisposableEffect(Unit) {
+                onDispose { statusViewModel.closePreview() }
+            }
+
+            MediaPreviewScreen(
+                item     = item,
+                isSaving = state.savingUri == item.uri,
+                onBack   = { navController.popBackStack() },
+                onSave   = { statusViewModel.saveStatus(item) }
+            )
+        }
     }
 }
 
@@ -82,6 +103,7 @@ fun AppEntry() {
 private fun MainScreen(
     onNavigateToBudgetHistory: () -> Unit,
     onNavigateToAppearance: () -> Unit,
+    onNavigateToStatusPreview: () -> Unit,
     homeViewModel:    HomeViewModel    = hiltViewModel(),
     groceryViewModel: GroceryViewModel = hiltViewModel(),
     statusViewModel:  StatusViewModel  = hiltViewModel(),
@@ -111,8 +133,9 @@ private fun MainScreen(
     BackHandler(enabled = fabMenuExpanded) { fabMenuExpanded = false }
 
     ModalNavigationDrawer(
-        drawerState   = drawerState,
-        drawerContent = {
+        drawerState     = drawerState,
+        gesturesEnabled = selectedTab != 2 || drawerState.currentValue == DrawerValue.Open,
+        drawerContent   = {
             AppDrawer(
                 days        = homeState.days,
                 selectedDay = homeState.selectedDay,
@@ -200,6 +223,7 @@ private fun MainScreen(
                     padding    = padding,
                     listState  = listState,
                     onDelete   = homeViewModel::deleteItem,
+                    onRetry    = homeViewModel::retryItem,
                     onAddFunds = { showAddFunds = true },
                     onRefresh  = homeViewModel::refresh
                 )
@@ -217,9 +241,11 @@ private fun MainScreen(
                     padding             = padding,
                     onPermissionGranted = statusViewModel::onPermissionGranted,
                     onSave              = statusViewModel::saveStatus,
-                    onItemClick         = statusViewModel::openPreview,
-                    onClosePreview      = statusViewModel::closePreview,
-                    onShowSnackbar      = { msg ->
+                    onItemClick         = { item ->
+                        statusViewModel.openPreview(item)
+                        onNavigateToStatusPreview()
+                    },
+                    onShowSnackbar = { msg ->
                         statusViewModel.clearMessage()
                         scope.launch { snackbarState.showSnackbar(msg) }
                     }

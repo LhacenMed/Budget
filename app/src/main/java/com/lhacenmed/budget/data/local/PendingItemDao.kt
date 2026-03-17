@@ -12,6 +12,12 @@ interface PendingItemDao {
     @Query("SELECT * FROM pending_spending_items")
     suspend fun getAll(): List<PendingSpendingItem>
 
+    @Query("SELECT * FROM pending_spending_items WHERE date = :date")
+    suspend fun getForDate(date: String): List<PendingSpendingItem>
+
+    @Query("SELECT * FROM pending_spending_items WHERE localId = :id LIMIT 1")
+    suspend fun getById(id: Int): PendingSpendingItem?
+
     @Query("SELECT COUNT(*) FROM pending_spending_items")
     suspend fun count(): Int
 

@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
@@ -33,6 +35,7 @@ import coil.compose.AsyncImage
 import com.lhacenmed.budget.data.model.StatusItem
 import com.lhacenmed.budget.data.repository.StatusSaverRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 // ── Content ───────────────────────────────────────────────────────────────────
@@ -46,7 +49,6 @@ fun StatusContent(
     onPermissionGranted: (Uri?) -> Unit,
     onSave: (StatusItem) -> Unit,
     onItemClick: (StatusItem) -> Unit,
-    onClosePreview: () -> Unit,
     onShowSnackbar: (String) -> Unit
 ) {
     LaunchedEffect(state.message) {
@@ -57,26 +59,15 @@ fun StatusContent(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri -> onPermissionGranted(uri) }
 
-    // Preview overlay — covers everything including top/bottom bars
-    if (state.previewItem != null) {
-        MediaPreviewScreen(
-            item     = state.previewItem,
-            isSaving = state.savingUri == state.previewItem.uri,
-            onBack   = onClosePreview,
-            onSave   = { onSave(state.previewItem) }
-        )
-        return
-    }
-
     Box(Modifier.fillMaxSize().padding(padding)) {
         when {
             !state.hasPermission -> PermissionScreen {
-                launcher.launch(StatusSaverRepository.WHATSAPP_STATUSES_URI)
+                launcher.launch(StatusSaverRepository.WHATSAPP_ROOT_URI)
             }
             state.isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 LoadingIndicator()
             }
-            else -> StatusGrid(state = state, onSave = onSave, onItemClick = onItemClick)
+            else -> StatusPager(state = state, onSave = onSave, onItemClick = onItemClick)
         }
     }
 }
@@ -93,10 +84,11 @@ private fun PermissionScreen(onGrant: () -> Unit) {
         Icon(Icons.Default.FolderOpen, contentDescription = null,
             modifier = Modifier.size(72.dp), tint = MaterialTheme.colorScheme.primary)
         Spacer(Modifier.height(24.dp))
-        Text("WhatsApp Status Saver", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text("WhatsApp Status Saver",
+            style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
         Text(
-            "Grant access to your WhatsApp statuses folder to view and save statuses you've already watched.",
+            "Grant access to your WhatsApp folder to view and save statuses you've already watched.",
             style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -104,60 +96,74 @@ private fun PermissionScreen(onGrant: () -> Unit) {
         Button(onClick = onGrant, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.FolderOpen, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text("Select WhatsApp Status Folder")
+            Text("Select WhatsApp Folder")
         }
         Spacer(Modifier.height(12.dp))
         Text(
-            "Navigate to: Android → media → com.whatsapp → WhatsApp → accounts → 1002 → Media → .Statuses",
+            "Grant access to the WhatsApp folder (or any parent). " +
+                    "The app will automatically find your statuses for single or multiple accounts.",
             style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.outline
         )
     }
 }
 
-// ── Grid ──────────────────────────────────────────────────────────────────────
+// ── Swipeable pager with synced TabRow ────────────────────────────────────────
 
 @RequiresApi(Build.VERSION_CODES.Q)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StatusGrid(
+private fun StatusPager(
     state: StatusUiState,
     onSave: (StatusItem) -> Unit,
     onItemClick: (StatusItem) -> Unit
 ) {
-    var selectedTab by remember { mutableIntStateOf(0) }
-    val items = if (selectedTab == 0) state.images else state.videos
+    val pages      = listOf(state.images, state.videos)
+    val labels     = listOf("Images (${state.images.size})", "Videos (${state.videos.size})")
+    val pagerState = rememberPagerState(pageCount = { pages.size })
+    val scope      = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize()) {
-        TabRow(selectedTabIndex = selectedTab) {
-            Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 },
-                text = { Text("Images (${state.images.size})") })
-            Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 },
-                text = { Text("Videos (${state.videos.size})") })
-        }
-
-        if (items.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    if (selectedTab == 0) "No images found.\nView some statuses in WhatsApp first."
-                    else "No videos found.\nView some statuses in WhatsApp first.",
-                    textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant
+        TabRow(selectedTabIndex = pagerState.currentPage) {
+            pages.indices.forEach { index ->
+                Tab(
+                    selected = pagerState.currentPage == index,
+                    onClick  = { scope.launch { pagerState.animateScrollToPage(index) } },
+                    text     = { Text(labels[index]) }
                 )
             }
-        } else {
-            LazyVerticalGrid(
-                columns               = GridCells.Fixed(3),
-                modifier              = Modifier.fillMaxSize(),
-                contentPadding        = PaddingValues(4.dp),
-                verticalArrangement   = Arrangement.spacedBy(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items(items, key = { it.uri }) { item ->
-                    StatusItemCell(
-                        item     = item,
-                        isSaving = state.savingUri == item.uri,
-                        onSave   = { onSave(item) },
-                        onClick  = { onItemClick(item) }
+        }
+
+        HorizontalPager(
+            state    = pagerState,
+            modifier = Modifier.fillMaxSize()
+        ) { page ->
+            val items = pages[page]
+            if (items.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        if (page == 0) "No images found.\nView some statuses in WhatsApp first."
+                        else           "No videos found.\nView some statuses in WhatsApp first.",
+                        textAlign = TextAlign.Center,
+                        color     = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns               = GridCells.Fixed(3),
+                    modifier              = Modifier.fillMaxSize(),
+                    contentPadding        = PaddingValues(4.dp),
+                    verticalArrangement   = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(items, key = { it.uri }) { item ->
+                        StatusItemCell(
+                            item     = item,
+                            isSaving = state.savingUri == item.uri,
+                            onSave   = { onSave(item) },
+                            onClick  = { onItemClick(item) }
+                        )
+                    }
                 }
             }
         }
@@ -188,23 +194,25 @@ private fun StatusItemCell(
             )
         } else {
             AsyncImage(
-                model = item.uri, contentDescription = item.name,
+                model        = item.uri, contentDescription = item.name,
                 contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
             )
         }
-
-        // Save button
         Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd).padding(4.dp)
-                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.75f), MaterialTheme.shapes.small)
+                .background(
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.75f),
+                    MaterialTheme.shapes.small
+                )
         ) {
             if (isSaving) {
                 LoadingIndicator(modifier = Modifier.size(28.dp).padding(4.dp))
             } else {
                 IconButton(onClick = onSave, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.Download, contentDescription = "Save",
-                        modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                        modifier = Modifier.size(18.dp),
+                        tint     = MaterialTheme.colorScheme.primary)
                 }
             }
         }
@@ -225,7 +233,7 @@ private fun VideoThumbnail(uri: Uri, modifier: Modifier) {
                     r.setDataSource(context, uri)
                     r.getFrameAtTime(0)
                 }
-            } catch (e: Exception) { null }
+            } catch (_: Exception) { null }
         }
     }
     if (bitmap != null) {

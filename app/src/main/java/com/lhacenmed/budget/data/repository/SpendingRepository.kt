@@ -22,12 +22,12 @@ class SpendingRepository @Inject constructor(
     private val pending get() = db.pendingItemDao()
     private val cache   get() = db.cacheDao()
 
-    // ── Cache reads (instant, offline-safe) ───────────────────────────────────
+    // ── Cache reads ───────────────────────────────────────────────────────────
 
     suspend fun getCachedSnapshot(): Pair<List<SpendingItem>, List<BudgetContribution>> =
         cache.readSpending() to cache.readContributions()
 
-    // ── Network fetches (update cache on success) ─────────────────────────────
+    // ── Network fetches ───────────────────────────────────────────────────────
 
     suspend fun getAllSpending(): List<SpendingItem> =
         supabase.from("spending_items").select().decodeList<SpendingItem>()
@@ -58,13 +58,38 @@ class SpendingRepository @Inject constructor(
         }
     }
 
-    suspend fun pendingCount(): Int = pending.count()
-
     suspend fun deleteItem(id: String) =
         supabase.from("spending_items").delete { filter { eq("id", id) } }
 
     suspend fun addContribution(contribution: BudgetContribution) =
         supabase.from("budget_contributions").insert(contribution)
+
+    // ── Pending queue helpers ─────────────────────────────────────────────────
+
+    /** Returns all pending items queued for a specific date (for merging into the day list). */
+    suspend fun getPendingForDay(date: String): List<PendingSpendingItem> =
+        pending.getForDate(date)
+
+    /** Returns a single pending item by its Room primary key, or null if not found. */
+    suspend fun getPendingById(localId: Int): PendingSpendingItem? =
+        pending.getById(localId)
+
+    /**
+     * Attempts to push a single pending item to Supabase immediately.
+     * Returns true on success (item removed from queue), false on failure (stays queued).
+     */
+    suspend fun retryItem(localId: Int): Boolean {
+        val p = pending.getById(localId) ?: return false
+        return runCatching {
+            supabase.from("spending_items").insert(p.toSpendingItem())
+            pending.deleteById(localId)
+        }.isSuccess
+    }
+
+    /** Removes a pending item from the queue without sending it. */
+    suspend fun deletePending(localId: Int) = pending.deleteById(localId)
+
+    suspend fun pendingCount(): Int = pending.count()
 
     // ── Mappers ───────────────────────────────────────────────────────────────
 

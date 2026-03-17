@@ -19,7 +19,9 @@ data class StatusUiState(
     val isLoading: Boolean       = false,
     val savingUri: Uri?          = null,
     val message: String?         = null,
-    val previewItem: StatusItem? = null  // non-null = preview open (image or video)
+    // Held here so MediaPreviewPage can read it via the shared VM instance
+    // without needing to pass a StatusItem through nav arguments
+    val previewItem: StatusItem? = null
 )
 
 @HiltViewModel
@@ -39,7 +41,7 @@ class StatusViewModel @Inject constructor(
     }
 
     fun openPreview(item: StatusItem) = _state.update { it.copy(previewItem = item) }
-    fun closePreview()                = _state.update { it.copy(previewItem = null) }
+    fun closePreview() = _state.update { it.copy(previewItem = null) }
 
     fun saveStatus(item: StatusItem) = viewModelScope.launch {
         _state.update { it.copy(savingUri = item.uri) }
@@ -54,11 +56,10 @@ class StatusViewModel @Inject constructor(
 
     private fun load(treeUri: Uri) = viewModelScope.launch {
         _state.update { it.copy(isLoading = true, hasPermission = true) }
-        val all      = repository.getStatuses(treeUri)
-        val noAccess = all.isEmpty() && repository.getSavedUri() == null
+        val all = repository.getStatuses(treeUri)
         _state.update { it.copy(
             isLoading     = false,
-            hasPermission = !noAccess,
+            hasPermission = all.isNotEmpty() || repository.getSavedUri() != null,
             images        = all.filter { s -> !s.isVideo },
             videos        = all.filter { s ->  s.isVideo }
         )}

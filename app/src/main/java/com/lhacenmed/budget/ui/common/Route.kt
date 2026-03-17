@@ -7,4 +7,5 @@ object Route {
     const val BUDGET_HISTORY = "budget_history"
     const val APPEARANCE     = "appearance"
     const val DARK_THEME     = "dark_theme"
+    const val STATUS_PREVIEW = "status_preview"
 }
