@@ -56,7 +56,6 @@ class GroceryViewModel @Inject constructor(
         groceryRepository.delete(id)
     }
 
-    /** Bulk-adds a list of parsed grocery items as spending entries for today. */
     fun addToSpendings(parsed: List<ParsedSpending>) = viewModelScope.launch {
         val today = LocalDate.now().toString()
         parsed.forEach { p ->
@@ -65,7 +64,7 @@ class GroceryViewModel @Inject constructor(
                     date     = today,
                     shopper  = shopperName,
                     name     = p.name,
-                    quantity = p.quantity,  // null when not specified
+                    quantity = p.quantity,
                     price    = p.price
                 )
             )
@@ -73,31 +72,14 @@ class GroceryViewModel @Inject constructor(
     }
 }
 
-/** A successfully extracted grocery-to-spending entry. */
 data class ParsedSpending(
     val name: String,
     val quantity: String?,
     val price: Float
 )
 
-/**
- * Parses a grocery item name into a spending entry.
- *
- * Supported formats (dots are separators):
- *   "Name. Price."          → name, no quantity, price  (2 parts)
- *   "Name. Quantity. Price." → name, quantity, price    (3 parts)
- *
- * Returns null when the format is unrecognised or the price is not a number.
- *
- * Examples:
- *   "Tomato. 12."       → ParsedSpending("Tomato",  null,   12f)
- *   "Tomato. 2kg. 12."  → ParsedSpending("Tomato",  "2kg",  12f)
- *   "Milk. 1L. 8.5."    → ParsedSpending("Milk",    "1L",   8.5f)
- *   "Just a note"       → null
- *   "Only. one"         → null  (second part is not a number → price missing)
- */
 fun parseGroceryName(name: String): ParsedSpending? {
-    val parts = name.split(".").map { it.trim() }.filter { it.isNotBlank() }
+    val parts = name.split(",").map { it.trim() }.filter { it.isNotBlank() }
     return when (parts.size) {
         2    -> parts[1].toFloatOrNull()?.let { price ->
             ParsedSpending(name = parts[0], quantity = null, price = price)
