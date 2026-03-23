@@ -7,6 +7,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -18,7 +20,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -58,11 +62,10 @@ fun MediaPreviewScreen(
         if (item.isVideo) {
             VideoPlayer(uri = item.uri, modifier = Modifier.fillMaxSize())
         } else {
-            AsyncImage(
-                model              = item.uri,
-                contentDescription = item.name,
-                contentScale       = ContentScale.Fit,
-                modifier           = Modifier.fillMaxSize()
+            ZoomableImage(
+                uri          = item.uri,
+                name         = item.name,
+                onTap        = { showControls = !showControls }
             )
         }
 
@@ -153,6 +156,66 @@ fun MediaPreviewScreen(
             confirmButton = {
                 TextButton(onClick = { showInfo = false }) { Text("OK") }
             }
+        )
+    }
+}
+
+// ── Zoomable image ────────────────────────────────────────────────────────────
+
+/**
+ * An image that supports pinch-to-zoom (1x – 5x) and panning when zoomed in.
+ * Tapping fires [onTap] only when at 1x scale (avoids fighting with pan gestures).
+ * Double-tap is not implemented — kept intentionally simple.
+ *
+ * Uses Compose's built-in [rememberTransformableState] + [transformable] modifier.
+ * No third-party library required.
+ */
+@Composable
+private fun ZoomableImage(
+    uri:   android.net.Uri,
+    name:  String,
+    onTap: () -> Unit
+) {
+    var scale  by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+
+    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        // Clamp scale between 1x and 5x
+        scale = (scale * zoomChange).coerceIn(1f, 5f)
+
+        // When zoomed back to 1x, reset pan so the image re-centers cleanly
+        if (scale == 1f) {
+            offset = Offset.Zero
+        } else {
+            offset += panChange
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            // transformable intercepts pinch and pan gestures
+            .transformable(state = transformState)
+            // Tap to toggle controls — only at 1x to avoid conflicting with panning
+            .clickable(
+                indication        = null,
+                interactionSource = remember { MutableInteractionSource() },
+                enabled           = scale == 1f
+            ) { onTap() },
+        contentAlignment = Alignment.Center
+    ) {
+        AsyncImage(
+            model              = uri,
+            contentDescription = name,
+            contentScale       = ContentScale.Fit,
+            modifier           = Modifier
+                .fillMaxSize()
+                .graphicsLayer(
+                    scaleX        = scale,
+                    scaleY        = scale,
+                    translationX  = offset.x,
+                    translationY  = offset.y
+                )
         )
     }
 }
