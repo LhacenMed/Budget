@@ -25,19 +25,16 @@ import com.lhacenmed.budget.ui.common.PredictiveExitHandler
 import com.lhacenmed.budget.ui.common.SettingsProvider
 import com.lhacenmed.budget.ui.page.AppEntry
 import com.lhacenmed.budget.ui.page.auth.AuthEntry
+import com.lhacenmed.budget.ui.page.auth.AuthGate
+import com.lhacenmed.budget.ui.page.auth.SessionOrchestrator
 import com.lhacenmed.budget.ui.theme.BudgetTheme
 import dagger.hilt.android.AndroidEntryPoint
-import io.github.jan.supabase.SupabaseClient
-import io.github.jan.supabase.auth.auth
-import io.github.jan.supabase.auth.status.SessionStatus
 import javax.inject.Inject
-
-private enum class AuthGate { Loading, App, Auth }
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    @Inject lateinit var supabase: SupabaseClient
+    @Inject lateinit var sessionOrchestrator: SessionOrchestrator
 
     @OptIn(ExperimentalMaterial3ExpressiveApi::class)
     @RequiresApi(Build.VERSION_CODES.Q)
@@ -49,16 +46,8 @@ class MainActivity : ComponentActivity() {
                 BudgetTheme {
                     Surface(modifier = Modifier.fillMaxSize()) {
                         PredictiveExitHandler(onExit = { finish() }) {
-                            val sessionStatus by supabase.auth.sessionStatus
-                                .collectAsStateWithLifecycle(initialValue = SessionStatus.Initializing)
-
-                            val gate = when (sessionStatus) {
-                                is SessionStatus.Initializing     -> AuthGate.Loading
-                                is SessionStatus.Authenticated    -> AuthGate.App
-                                is SessionStatus.NotAuthenticated -> AuthGate.Auth
-                                is SessionStatus.RefreshFailure   -> AuthGate.App
-                                else                              -> AuthGate.Loading
-                            }
+                            val gate by sessionOrchestrator.authGate
+                                .collectAsStateWithLifecycle()
 
                             AnimatedContent(
                                 targetState    = gate,
