@@ -1,5 +1,7 @@
 package com.lhacenmed.budget.ui.page
 
+//noinspection SuspiciousImport
+import android.R
 import android.annotation.SuppressLint
 import android.os.Build
 import android.util.TypedValue
@@ -171,7 +173,7 @@ private fun MainScreen(
                                     setImageDrawable(DrawerArrowDrawable(ctx).apply { progress = 0f })
                                     val tv = TypedValue()
                                     ctx.theme.resolveAttribute(
-                                        android.R.attr.selectableItemBackgroundBorderless, tv, true
+                                        R.attr.selectableItemBackgroundBorderless, tv, true
                                     )
                                     setBackgroundResource(tv.resourceId)
                                     ViewCompat.setTooltipText(this, "Open navigation drawer")
@@ -237,14 +239,15 @@ private fun MainScreen(
                     onAddToSpendings = groceryViewModel::addToSpendings
                 )
                 2 -> StatusContent(
-                    state               = statusState,
-                    padding             = padding,
+                    state = statusState,
+                    padding = padding,
                     onPermissionGranted = statusViewModel::onPermissionGranted,
-                    onSave              = statusViewModel::saveStatus,
-                    onItemClick         = { item ->
+                    onSave = statusViewModel::saveStatus,
+                    onItemClick = { item ->
                         statusViewModel.openPreview(item)
                         onNavigateToStatusPreview()
                     },
+                    onRefresh      = statusViewModel::refresh,
                     onShowSnackbar = { msg ->
                         statusViewModel.clearMessage()
                         scope.launch { snackbarState.showSnackbar(msg) }

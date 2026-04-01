@@ -15,6 +15,8 @@ import com.lhacenmed.budget.data.model.StatusSource
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -38,23 +40,52 @@ class StatusSaverRepository @Inject constructor(
 
     fun clearUri() = prefs.edit { remove(KEY_URI) }
 
+    // ── Cache ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Returns the last successfully scanned list from SharedPreferences.
+     * Synchronous and fast — safe to call on the main thread during VM init.
+     */
+    fun getCachedStatuses(): List<StatusItem> {
+        val json = prefs.getString(KEY_CACHE, null) ?: return emptyList()
+        return try {
+            val array = JSONArray(json)
+            (0 until array.length()).mapNotNull { i ->
+                val obj = array.getJSONObject(i)
+                StatusItem(
+                    uri     = obj.getString("uri").toUri(),
+                    name    = obj.getString("name"),
+                    isVideo = obj.getBoolean("isVideo"),
+                    source  = StatusSource.valueOf(obj.getString("source"))
+                )
+            }
+        } catch (_: Exception) { emptyList() }
+    }
+
+    /**
+     * Persists [items] to SharedPreferences so the next cold start is instant.
+     * Called after every successful SAF scan.
+     */
+    internal fun saveCache(items: List<StatusItem>) {
+        val array = JSONArray()
+        items.forEach { item ->
+            array.put(JSONObject().apply {
+                put("uri",     item.uri.toString())
+                put("name",    item.name)
+                put("isVideo", item.isVideo)
+                put("source",  item.source.name)
+            })
+        }
+        prefs.edit { putString(KEY_CACHE, array.toString()) }
+    }
+
+    private fun clearCache() = prefs.edit { remove(KEY_CACHE) }
+
     // ── Read statuses ─────────────────────────────────────────────────────────
 
     /**
-     * Returns all status items from both WhatsApp and WhatsApp Business.
-     *
-     * The user grants access to the Android media root:
-     *   /storage/emulated/0/Android/media/
-     *
-     * Under that root we look for:
-     *   com.whatsapp      → tagged [StatusSource.WHATSAPP]
-     *   com.whatsapp.w4b  → tagged [StatusSource.WHATSAPP_BUSINESS]
-     *
-     * Within each app folder we recursively find the `.Statuses` directory
-     * (handles both old and multi-account path layouts) up to [MAX_SCAN_DEPTH].
-     *
-     * All SAF [DocumentFile.listFiles] calls are dispatched to [Dispatchers.IO]
-     * to avoid blocking the main thread.
+     * Full scan of both [PACKAGE_WHATSAPP] and [PACKAGE_WHATSAPP_BUSINESS] under [treeUri].
+     * Dispatched to [Dispatchers.IO]. Saves result to cache on success.
      */
     suspend fun getStatuses(treeUri: Uri): List<StatusItem> = withContext(Dispatchers.IO) {
         try {
@@ -65,12 +96,29 @@ class StatusSaverRepository @Inject constructor(
             val waItems  = waDir?.let  { readFromAppRoot(it, StatusSource.WHATSAPP)          } ?: emptyList()
             val bizItems = bizDir?.let { readFromAppRoot(it, StatusSource.WHATSAPP_BUSINESS) } ?: emptyList()
 
-            waItems + bizItems
+            val all = waItems + bizItems
+            if (all.isNotEmpty()) saveCache(all)
+            all
         } catch (_: Exception) {
             clearUri()
+            clearCache()
             emptyList()
         }
     }
+
+    /**
+     * Partial scan — only the folder belonging to [source].
+     * Used by pull-to-refresh so only one app's folder is re-traversed.
+     */
+    suspend fun getStatusesForSource(treeUri: Uri, source: StatusSource): List<StatusItem> =
+        withContext(Dispatchers.IO) {
+            try {
+                val root   = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
+                val pkg    = if (source == StatusSource.WHATSAPP) PACKAGE_WHATSAPP else PACKAGE_WHATSAPP_BUSINESS
+                val appDir = root.findFile(pkg) ?: return@withContext emptyList()
+                readFromAppRoot(appDir, source)
+            } catch (_: Exception) { emptyList() }
+        }
 
     /**
      * Finds the `.Statuses` folder within an app's media directory,
@@ -158,6 +206,7 @@ class StatusSaverRepository @Inject constructor(
 
     companion object {
         private const val KEY_URI                   = "tree_uri"
+        private const val KEY_CACHE                 = "statuses_cache"
         private const val STATUSES_FOLDER_NAME      = ".Statuses"
         private const val MAX_SCAN_DEPTH            = 4
         private const val PACKAGE_WHATSAPP          = "com.whatsapp"
@@ -173,6 +222,7 @@ class StatusSaverRepository @Inject constructor(
          *
          * primary%3AAndroid%2Fmedia = URL-encoded "primary:Android/media"
          */
+        @Suppress("SpellCheckingInspection")
         val ANDROID_MEDIA_ROOT_URI: Uri = (
                 "content://com.android.externalstorage.documents/document/" +
                         "primary%3AAndroid%2Fmedia"

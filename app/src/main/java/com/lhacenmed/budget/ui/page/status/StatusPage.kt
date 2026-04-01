@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,6 +37,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.lhacenmed.budget.data.model.StatusItem
+import com.lhacenmed.budget.data.model.StatusSource
 import com.lhacenmed.budget.data.repository.StatusSaverRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -60,6 +62,7 @@ fun StatusContent(
     onPermissionGranted: (Uri?) -> Unit,
     onSave:              (StatusItem) -> Unit,
     onItemClick:         (StatusItem) -> Unit,
+    onRefresh:           (StatusSource) -> Unit,
     onShowSnackbar:      (String) -> Unit
 ) {
     LaunchedEffect(state.message) {
@@ -81,7 +84,8 @@ fun StatusContent(
             else -> DualAppStatusPager(
                 state       = state,
                 onSave      = onSave,
-                onItemClick = onItemClick
+                onItemClick = onItemClick,
+                onRefresh   = onRefresh
             )
         }
     }
@@ -142,10 +146,10 @@ private fun PermissionScreen(onGrant: () -> Unit) {
         Spacer(Modifier.height(12.dp))
 
         val steps = listOf(
-            "Enable " to "'Show Internal Storage'",
+            "Enable "       to "'Show Internal Storage'",
             "Select your phone's " to "Primary Storage",
-            "Navigate to the " to "Android › media",
-            "Tap " to "\"Use This Folder\"",
+            "Navigate to the "    to "Android › media",
+            "Tap "                to "\"Use This Folder\""
         )
         val stepDetails = listOf(
             " if you cannot see your primary storage in the left drawer.",
@@ -156,22 +160,19 @@ private fun PermissionScreen(onGrant: () -> Unit) {
 
         steps.forEachIndexed { index, (plain, bold) ->
             Row(
-                modifier      = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
+                modifier          = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 verticalAlignment = Alignment.Top
             ) {
-                // Step badge
                 Surface(
-                    color  = primary,
-                    shape  = MaterialTheme.shapes.small,
+                    color    = primary,
+                    shape    = MaterialTheme.shapes.small,
                     modifier = Modifier.size(22.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Text(
-                            text  = "${index + 1}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onPrimary,
+                            text       = "${index + 1}",
+                            style      = MaterialTheme.typography.labelSmall,
+                            color      = MaterialTheme.colorScheme.onPrimary,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -225,19 +226,24 @@ private fun PermissionScreen(onGrant: () -> Unit) {
 // ── Dual-app pager ────────────────────────────────────────────────────────────
 
 /**
- * Two stacked [TabRow]s drive a single [HorizontalPager] of 4 pages:
- *   Row 1 — App selector:   WhatsApp | WhatsApp Business
- *   Row 2 — Media type:     Images   | Videos
+ * Two stacked tab rows drive a single [HorizontalPager] of 4 pages:
+ *   Row 1 — App selector:   WhatsApp | WhatsApp Business   ([PrimaryTabRow])
+ *   Row 2 — Media type:     Images   | Videos              ([SecondaryTabRow])
  *
  * Page layout: page = appIndex * 2 + mediaIndex
  * This avoids nested pagers entirely, so there are no scroll-conflict issues.
+ *
+ * Each page is wrapped in a [PullToRefreshBox] that triggers a partial SAF
+ * re-scan for only that page's app source.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @RequiresApi(Build.VERSION_CODES.Q)
 @Composable
 private fun DualAppStatusPager(
     state:       StatusUiState,
     onSave:      (StatusItem) -> Unit,
-    onItemClick: (StatusItem) -> Unit
+    onItemClick: (StatusItem) -> Unit,
+    onRefresh:   (StatusSource) -> Unit
 ) {
     val pagerState = rememberPagerState(pageCount = { PAGE_COUNT })
     val scope      = rememberCoroutineScope()
@@ -252,18 +258,14 @@ private fun DualAppStatusPager(
         // ── Row 1: App selector ───────────────────────────────────────────────
         PrimaryTabRow(selectedTabIndex = appIndex) {
             AppTab(
-                selected   = appIndex == 0,
-                label      = "WhatsApp",
-                imageCount = state.whatsapp.images.size,
-                videoCount = state.whatsapp.videos.size,
-                onClick    = { scope.launch { pagerState.animateScrollToPage(pageOf(0, mediaIndex)) } }
+                selected = appIndex == 0,
+                label    = "WhatsApp",
+                onClick  = { scope.launch { pagerState.animateScrollToPage(pageOf(0, mediaIndex)) } }
             )
             AppTab(
-                selected   = appIndex == 1,
-                label      = "Business",
-                imageCount = state.business.images.size,
-                videoCount = state.business.videos.size,
-                onClick    = { scope.launch { pagerState.animateScrollToPage(pageOf(1, mediaIndex)) } }
+                selected = appIndex == 1,
+                label    = "Business",
+                onClick  = { scope.launch { pagerState.animateScrollToPage(pageOf(1, mediaIndex)) } }
             )
         }
 
@@ -286,6 +288,9 @@ private fun DualAppStatusPager(
             state    = pagerState,
             modifier = Modifier.fillMaxSize()
         ) { page ->
+            val source = if (appIndexOf(page) == 0) StatusSource.WHATSAPP else StatusSource.WHATSAPP_BUSINESS
+            val isRefreshing = if (appIndexOf(page) == 0) state.isRefreshingWhatsapp
+            else                        state.isRefreshingBusiness
             val items = when (page) {
                 0    -> state.whatsapp.images
                 1    -> state.whatsapp.videos
@@ -296,15 +301,22 @@ private fun DualAppStatusPager(
             val isVideos = mediaIndexOf(page) == 1
             val appLabel = if (appIndexOf(page) == 0) "WhatsApp" else "WhatsApp Business"
 
-            if (items.isEmpty()) {
-                EmptyPage(appLabel = appLabel, isVideos = isVideos)
-            } else {
-                StatusGrid(
-                    items       = items,
-                    savingUri   = state.savingUri,
-                    onSave      = onSave,
-                    onItemClick = onItemClick
-                )
+            PullToRefreshBox(
+                isRefreshing = isRefreshing,
+                onRefresh    = { onRefresh(source) },
+                modifier     = Modifier.fillMaxSize()
+            ) {
+                if (items.isEmpty()) {
+                    // Empty state must fill the box so pull-to-refresh is reachable
+                    EmptyPage(appLabel = appLabel, isVideos = isVideos)
+                } else {
+                    StatusGrid(
+                        items       = items,
+                        savingUri   = state.savingUri,
+                        onSave      = onSave,
+                        onItemClick = onItemClick
+                    )
+                }
             }
         }
     }
@@ -314,34 +326,20 @@ private fun DualAppStatusPager(
 
 @Composable
 private fun AppTab(
-    selected:   Boolean,
-    label:      String,
-    imageCount: Int,
-    videoCount: Int,
-    onClick:    () -> Unit
+    selected: Boolean,
+    label:    String,
+    onClick:  () -> Unit
 ) {
     Tab(
         selected = selected,
-        onClick  = onClick
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier            = Modifier.padding(vertical = 10.dp)
-        ) {
+        onClick  = onClick,
+        text     = {
             Text(
                 text       = label,
-                style      = MaterialTheme.typography.labelLarge,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
             )
-            if (imageCount > 0 || videoCount > 0) {
-                Text(
-                    text  = "$imageCount img · $videoCount vid",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
         }
-    }
+    )
 }
 
 // ── Empty state ───────────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ object AppModule {
     @Provides @Singleton
     fun provideBaseUrl(): String = BuildConfig.BASE_URL
 
+    @Suppress("SpellCheckingInspection")
     @Provides @Singleton
     fun provideSupabaseClient(): SupabaseClient = createSupabaseClient(
         supabaseUrl = "https://xoydbvnuftlpradakvky.supabase.co",
