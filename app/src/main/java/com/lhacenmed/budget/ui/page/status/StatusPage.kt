@@ -273,8 +273,9 @@ private fun PermissionScreen(onGrant: () -> Unit) {
  * Items are the merged result of all [StatusUiState.visibleSources] — filtering
  * is applied by [StatusUiState.images] / [StatusUiState.videos] computed properties.
  *
- * Each page has its own [PullToRefreshBox] so the pull gesture works regardless
- * of whether the list is empty or populated.
+ * [beyondViewportPageCount] = 1 keeps both pages in composition simultaneously,
+ * so [VideoThumbnail]'s [produceState] bitmap results survive tab switches
+ * without being recomputed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @RequiresApi(Build.VERSION_CODES.Q)
@@ -306,8 +307,11 @@ private fun StatusPager(
 
         // ── Content ───────────────────────────────────────────────────────────
         HorizontalPager(
-            state    = pagerState,
-            modifier = Modifier.fillMaxSize()
+            state                  = pagerState,
+            modifier               = Modifier.fillMaxSize(),
+            // Keeps both pages alive in composition so VideoThumbnail bitmaps
+            // are not discarded and reloaded every time the user switches tabs.
+            beyondViewportPageCount = 1
         ) { page ->
             val items    = if (page == 0) state.images else state.videos
             val isVideos = page == 1

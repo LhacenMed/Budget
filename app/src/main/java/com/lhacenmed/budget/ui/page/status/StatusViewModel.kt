@@ -6,8 +6,10 @@ import androidx.lifecycle.viewModelScope
 import com.lhacenmed.budget.data.model.StatusItem
 import com.lhacenmed.budget.data.model.StatusSource
 import com.lhacenmed.budget.data.repository.StatusSaverRepository
+import com.lhacenmed.budget.util.PreferenceUtil
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,18 +24,18 @@ data class AppStatuses(
 )
 
 data class StatusUiState(
-    val hasPermission: Boolean             = false,
-    val whatsapp: AppStatuses              = AppStatuses(),
+    val hasPermission: Boolean            = false,
+    val whatsapp: AppStatuses             = AppStatuses(),
     val business: AppStatuses             = AppStatuses(),
     /** Which app sources are currently shown. Never empty — VM enforces at least one. */
-    val visibleSources: Set<StatusSource>  = setOf(StatusSource.WHATSAPP, StatusSource.WHATSAPP_BUSINESS),
-    val isLoading: Boolean                 = false,
-    val isRefreshing: Boolean              = false,
-    val savingUri: Uri?                    = null,
-    val message: String?                   = null,
+    val visibleSources: Set<StatusSource> = setOf(StatusSource.WHATSAPP, StatusSource.WHATSAPP_BUSINESS),
+    val isLoading: Boolean                = false,
+    val isRefreshing: Boolean             = false,
+    val savingUri: Uri?                   = null,
+    val message: String?                  = null,
     // Held here so MediaPreviewPage can read it via the shared VM instance
     // without needing to pass a StatusItem through nav arguments
-    val previewItem: StatusItem?           = null
+    val previewItem: StatusItem?          = null
 ) {
     /** Merged images from all visible sources, sorted newest-first. */
     val images: List<StatusItem> get() {
@@ -66,6 +68,9 @@ class StatusViewModel @Inject constructor(
     }
 
     init {
+        // Restore persisted source visibility before serving any content
+        _state.update { it.copy(visibleSources = PreferenceUtil.visibleStatusSources.value) }
+
         val cached = repository.getCachedStatuses()
         if (cached.isNotEmpty()) {
             // Serve cache immediately — zero loading delay on cold start.
@@ -92,6 +97,7 @@ class StatusViewModel @Inject constructor(
     /**
      * Toggles a source's visibility. Enforces that at least one source stays visible —
      * attempting to remove the last visible source is a no-op.
+     * Persists the new selection to DataStore so it survives app restarts.
      */
     fun toggleSource(source: StatusSource) {
         _state.update { s ->
@@ -99,6 +105,7 @@ class StatusViewModel @Inject constructor(
             if (source in next && next.size > 1) next.remove(source) else next.add(source)
             s.copy(visibleSources = next)
         }
+        PreferenceUtil.setVisibleStatusSources(_state.value.visibleSources)
     }
 
     /**
@@ -110,12 +117,24 @@ class StatusViewModel @Inject constructor(
         if (active) startLivePolling() else stopLivePolling()
     }
 
-    /** Manual pull-to-refresh — full scan, shows the refresh indicator. */
+    /**
+     * Manual pull-to-refresh.
+     *
+     * Both app source scans run in parallel via [async], so the total wall-clock
+     * time equals the slower of the two scans rather than their sum.
+     * The result is applied and persisted to cache atomically once both complete.
+     */
     fun refresh() = viewModelScope.launch {
         val treeUri = repository.getSavedUri() ?: return@launch
         _state.update { it.copy(isRefreshing = true) }
-        val all = repository.getStatuses(treeUri)
+
+        // Scan both app subtrees concurrently
+        val waDeferred  = async { repository.getStatusesForSource(treeUri, StatusSource.WHATSAPP) }
+        val bizDeferred = async { repository.getStatusesForSource(treeUri, StatusSource.WHATSAPP_BUSINESS) }
+
+        val all = waDeferred.await() + bizDeferred.await()
         applyItems(all, isLoading = false)
+        if (all.isNotEmpty()) repository.saveCache(all)
         _state.update { it.copy(isRefreshing = false) }
     }
 

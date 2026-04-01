@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.lhacenmed.budget.data.model.StatusSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,14 +24,19 @@ object PreferenceUtil {
     val DEFAULT_DARK_THEME    = DarkThemePreference()
     val DEFAULT_DYNAMIC_COLOR = true
     val DEFAULT_COLOR_INDEX   = 0
+    // Both sources visible by default
+    val DEFAULT_SHOW_WHATSAPP          = true
+    val DEFAULT_SHOW_WHATSAPP_BUSINESS = true
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var dataStore: DataStore<Preferences>
 
-    private val KEY_DARK_THEME    = intPreferencesKey("dark_theme_value")
-    private val KEY_HIGH_CONTRAST = booleanPreferencesKey("high_contrast")
-    private val KEY_DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
-    private val KEY_COLOR_INDEX   = intPreferencesKey("theme_color_index")
+    private val KEY_DARK_THEME              = intPreferencesKey("dark_theme_value")
+    private val KEY_HIGH_CONTRAST           = booleanPreferencesKey("high_contrast")
+    private val KEY_DYNAMIC_COLOR           = booleanPreferencesKey("dynamic_color")
+    private val KEY_COLOR_INDEX             = intPreferencesKey("theme_color_index")
+    private val KEY_SHOW_WHATSAPP           = booleanPreferencesKey("show_whatsapp")
+    private val KEY_SHOW_WHATSAPP_BUSINESS  = booleanPreferencesKey("show_whatsapp_business")
 
     private val _darkThemePreference   = MutableStateFlow(DEFAULT_DARK_THEME)
     val darkThemePreference: StateFlow<DarkThemePreference> = _darkThemePreference
@@ -40,6 +46,11 @@ object PreferenceUtil {
 
     private val _themeColorIndex = MutableStateFlow(DEFAULT_COLOR_INDEX)
     val themeColorIndex: StateFlow<Int> = _themeColorIndex
+
+    private val _visibleStatusSources = MutableStateFlow(
+        setOf(StatusSource.WHATSAPP, StatusSource.WHATSAPP_BUSINESS)
+    )
+    val visibleStatusSources: StateFlow<Set<StatusSource>> = _visibleStatusSources
 
     fun init(context: Context) {
         dataStore = context.applicationContext.appDataStore
@@ -51,6 +62,16 @@ object PreferenceUtil {
                 )
                 _isDynamicColorEnabled.value = prefs[KEY_DYNAMIC_COLOR] ?: DEFAULT_DYNAMIC_COLOR
                 _themeColorIndex.value       = prefs[KEY_COLOR_INDEX]   ?: DEFAULT_COLOR_INDEX
+
+                val showWa  = prefs[KEY_SHOW_WHATSAPP]          ?: DEFAULT_SHOW_WHATSAPP
+                val showBiz = prefs[KEY_SHOW_WHATSAPP_BUSINESS]  ?: DEFAULT_SHOW_WHATSAPP_BUSINESS
+                // Enforce at least one source — if both were somehow persisted as false, reset to both
+                _visibleStatusSources.value = when {
+                    showWa && showBiz -> setOf(StatusSource.WHATSAPP, StatusSource.WHATSAPP_BUSINESS)
+                    showWa            -> setOf(StatusSource.WHATSAPP)
+                    showBiz           -> setOf(StatusSource.WHATSAPP_BUSINESS)
+                    else              -> setOf(StatusSource.WHATSAPP, StatusSource.WHATSAPP_BUSINESS)
+                }
             }
         }
     }
@@ -79,6 +100,15 @@ object PreferenceUtil {
         scope.launch {
             dataStore.edit { prefs ->
                 prefs[KEY_COLOR_INDEX] = index
+            }
+        }
+    }
+
+    fun setVisibleStatusSources(sources: Set<StatusSource>) {
+        scope.launch {
+            dataStore.edit { prefs ->
+                prefs[KEY_SHOW_WHATSAPP]          = StatusSource.WHATSAPP          in sources
+                prefs[KEY_SHOW_WHATSAPP_BUSINESS] = StatusSource.WHATSAPP_BUSINESS in sources
             }
         }
     }

@@ -14,6 +14,7 @@ import com.lhacenmed.budget.data.model.StatusItem
 import com.lhacenmed.budget.data.model.StatusSource
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -85,18 +86,20 @@ class StatusSaverRepository @Inject constructor(
 
     /**
      * Full scan of both [PACKAGE_WHATSAPP] and [PACKAGE_WHATSAPP_BUSINESS] under [treeUri].
+     *
+     * Both app subtrees are scanned in parallel via [async] — wall-clock time is
+     * determined by the slower of the two scans rather than their sum.
      * Dispatched to [Dispatchers.IO]. Saves result to cache on success.
      */
     suspend fun getStatuses(treeUri: Uri): List<StatusItem> = withContext(Dispatchers.IO) {
         try {
             val root   = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
-            val waDir  = root.findFile(PACKAGE_WHATSAPP)
-            val bizDir = root.findFile(PACKAGE_WHATSAPP_BUSINESS)
 
-            val waItems  = waDir?.let  { readFromAppRoot(it, StatusSource.WHATSAPP)          } ?: emptyList()
-            val bizItems = bizDir?.let { readFromAppRoot(it, StatusSource.WHATSAPP_BUSINESS) } ?: emptyList()
+            // Launch both subtree scans concurrently
+            val waDeferred  = async { root.findFile(PACKAGE_WHATSAPP)?.let          { readFromAppRoot(it, StatusSource.WHATSAPP)          } ?: emptyList() }
+            val bizDeferred = async { root.findFile(PACKAGE_WHATSAPP_BUSINESS)?.let { readFromAppRoot(it, StatusSource.WHATSAPP_BUSINESS) } ?: emptyList() }
 
-            val all = waItems + bizItems
+            val all = waDeferred.await() + bizDeferred.await()
             if (all.isNotEmpty()) saveCache(all)
             all
         } catch (_: Exception) {
@@ -108,7 +111,7 @@ class StatusSaverRepository @Inject constructor(
 
     /**
      * Partial scan — only the folder belonging to [source].
-     * Used by pull-to-refresh so only one app's folder is re-traversed.
+     * Used by [StatusViewModel] for background live-polling of a single source.
      */
     suspend fun getStatusesForSource(treeUri: Uri, source: StatusSource): List<StatusItem> =
         withContext(Dispatchers.IO) {
