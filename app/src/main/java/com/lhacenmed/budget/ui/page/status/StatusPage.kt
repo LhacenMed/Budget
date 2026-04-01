@@ -19,6 +19,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -44,12 +45,54 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 // ── Page indices ──────────────────────────────────────────────────────────────
-// Layout: page = appIndex * 2 + mediaIndex
-// 0 = WA Images | 1 = WA Videos | 2 = Biz Images | 3 = Biz Videos
-private const val PAGE_COUNT = 4
-private fun pageOf(appIndex: Int, mediaIndex: Int) = appIndex * 2 + mediaIndex
-private fun appIndexOf(page: Int)   = page / 2
-private fun mediaIndexOf(page: Int) = page % 2
+// 0 = Images | 1 = Videos
+private const val PAGE_COUNT = 2
+
+// ── Filter menu ───────────────────────────────────────────────────────────────
+
+/**
+ * Three-dots dropdown shown in the TopAppBar when the status tab is active.
+ * Lets the user toggle which app's statuses are visible.
+ * At least one source is always kept checked (enforced by [StatusViewModel.toggleSource]).
+ */
+@Composable
+fun StatusFilterMenu(
+    visibleSources: Set<StatusSource>,
+    onToggle:       (StatusSource) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Default.MoreVert, contentDescription = "Filter sources")
+        }
+        DropdownMenu(
+            expanded         = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            DropdownMenuItem(
+                text    = { Text("WhatsApp") },
+                onClick = { onToggle(StatusSource.WHATSAPP) },
+                leadingIcon = {
+                    Checkbox(
+                        checked         = StatusSource.WHATSAPP in visibleSources,
+                        onCheckedChange = null  // click handled by the item
+                    )
+                }
+            )
+            DropdownMenuItem(
+                text    = { Text("WhatsApp Business") },
+                onClick = { onToggle(StatusSource.WHATSAPP_BUSINESS) },
+                leadingIcon = {
+                    Checkbox(
+                        checked         = StatusSource.WHATSAPP_BUSINESS in visibleSources,
+                        onCheckedChange = null
+                    )
+                }
+            )
+        }
+    }
+}
 
 // ── Content ───────────────────────────────────────────────────────────────────
 
@@ -62,7 +105,7 @@ fun StatusContent(
     onPermissionGranted: (Uri?) -> Unit,
     onSave:              (StatusItem) -> Unit,
     onItemClick:         (StatusItem) -> Unit,
-    onRefresh:           (StatusSource) -> Unit,
+    onRefresh:           () -> Unit,
     onShowSnackbar:      (String) -> Unit
 ) {
     LaunchedEffect(state.message) {
@@ -81,7 +124,7 @@ fun StatusContent(
             state.isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 LoadingIndicator()
             }
-            else -> DualAppStatusPager(
+            else -> StatusPager(
                 state       = state,
                 onSave      = onSave,
                 onItemClick = onItemClick,
@@ -146,10 +189,10 @@ private fun PermissionScreen(onGrant: () -> Unit) {
         Spacer(Modifier.height(12.dp))
 
         val steps = listOf(
-            "Enable "       to "'Show Internal Storage'",
+            "Enable "              to "'Show Internal Storage'",
             "Select your phone's " to "Primary Storage",
-            "Navigate to the "    to "Android › media",
-            "Tap "                to "\"Use This Folder\""
+            "Navigate to the "     to "Android › media",
+            "Tap "                 to "\"Use This Folder\""
         )
         val stepDetails = listOf(
             " if you cannot see your primary storage in the left drawer.",
@@ -223,92 +266,60 @@ private fun PermissionScreen(onGrant: () -> Unit) {
     }
 }
 
-// ── Dual-app pager ────────────────────────────────────────────────────────────
+// ── Pager ─────────────────────────────────────────────────────────────────────
 
 /**
- * Two stacked tab rows drive a single [HorizontalPager] of 4 pages:
- *   Row 1 — App selector:   WhatsApp | WhatsApp Business   ([PrimaryTabRow])
- *   Row 2 — Media type:     Images   | Videos              ([SecondaryTabRow])
+ * Single [SecondaryTabRow] (Images / Videos) driving a 2-page [HorizontalPager].
+ * Items are the merged result of all [StatusUiState.visibleSources] — filtering
+ * is applied by [StatusUiState.images] / [StatusUiState.videos] computed properties.
  *
- * Page layout: page = appIndex * 2 + mediaIndex
- * This avoids nested pagers entirely, so there are no scroll-conflict issues.
- *
- * Each page is wrapped in a [PullToRefreshBox] that triggers a partial SAF
- * re-scan for only that page's app source.
+ * Each page has its own [PullToRefreshBox] so the pull gesture works regardless
+ * of whether the list is empty or populated.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @RequiresApi(Build.VERSION_CODES.Q)
 @Composable
-private fun DualAppStatusPager(
+private fun StatusPager(
     state:       StatusUiState,
     onSave:      (StatusItem) -> Unit,
     onItemClick: (StatusItem) -> Unit,
-    onRefresh:   (StatusSource) -> Unit
+    onRefresh:   () -> Unit
 ) {
     val pagerState = rememberPagerState(pageCount = { PAGE_COUNT })
     val scope      = rememberCoroutineScope()
 
-    val appIndex   = appIndexOf(pagerState.currentPage)
-    val mediaIndex = mediaIndexOf(pagerState.currentPage)
-
-    val currentStatuses = if (appIndex == 0) state.whatsapp else state.business
-
     Column(Modifier.fillMaxSize()) {
 
-        // ── Row 1: App selector ───────────────────────────────────────────────
-        PrimaryTabRow(selectedTabIndex = appIndex) {
-            AppTab(
-                selected = appIndex == 0,
-                label    = "WhatsApp",
-                onClick  = { scope.launch { pagerState.animateScrollToPage(pageOf(0, mediaIndex)) } }
+        // ── Media type selector ───────────────────────────────────────────────
+        SecondaryTabRow(selectedTabIndex = pagerState.currentPage) {
+            Tab(
+                selected = pagerState.currentPage == 0,
+                onClick  = { scope.launch { pagerState.animateScrollToPage(0) } },
+                text     = { Text("Images (${state.images.size})") }
             )
-            AppTab(
-                selected = appIndex == 1,
-                label    = "Business",
-                onClick  = { scope.launch { pagerState.animateScrollToPage(pageOf(1, mediaIndex)) } }
+            Tab(
+                selected = pagerState.currentPage == 1,
+                onClick  = { scope.launch { pagerState.animateScrollToPage(1) } },
+                text     = { Text("Videos (${state.videos.size})") }
             )
         }
 
-        // ── Row 2: Media type ─────────────────────────────────────────────────
-        SecondaryTabRow(selectedTabIndex = mediaIndex) {
-            Tab(
-                selected = mediaIndex == 0,
-                onClick  = { scope.launch { pagerState.animateScrollToPage(pageOf(appIndex, 0)) } },
-                text     = { Text("Images (${currentStatuses.images.size})") }
-            )
-            Tab(
-                selected = mediaIndex == 1,
-                onClick  = { scope.launch { pagerState.animateScrollToPage(pageOf(appIndex, 1)) } },
-                text     = { Text("Videos (${currentStatuses.videos.size})") }
-            )
-        }
-
-        // ── Content pager ─────────────────────────────────────────────────────
+        // ── Content ───────────────────────────────────────────────────────────
         HorizontalPager(
             state    = pagerState,
             modifier = Modifier.fillMaxSize()
         ) { page ->
-            val source = if (appIndexOf(page) == 0) StatusSource.WHATSAPP else StatusSource.WHATSAPP_BUSINESS
-            val isRefreshing = if (appIndexOf(page) == 0) state.isRefreshingWhatsapp
-            else                        state.isRefreshingBusiness
-            val items = when (page) {
-                0    -> state.whatsapp.images
-                1    -> state.whatsapp.videos
-                2    -> state.business.images
-                3    -> state.business.videos
-                else -> emptyList()
-            }
-            val isVideos = mediaIndexOf(page) == 1
-            val appLabel = if (appIndexOf(page) == 0) "WhatsApp" else "WhatsApp Business"
+            val items    = if (page == 0) state.images else state.videos
+            val isVideos = page == 1
 
             PullToRefreshBox(
-                isRefreshing = isRefreshing,
-                onRefresh    = { onRefresh(source) },
+                isRefreshing = state.isRefreshing,
+                onRefresh    = onRefresh,
                 modifier     = Modifier.fillMaxSize()
             ) {
                 if (items.isEmpty()) {
-                    // Empty state must fill the box so pull-to-refresh is reachable
-                    EmptyPage(appLabel = appLabel, isVideos = isVideos)
+                    // Empty state fills the box so pull-to-refresh is still reachable
+                    EmptyPage(isVideos = isVideos)
                 } else {
                     StatusGrid(
                         items       = items,
@@ -322,34 +333,14 @@ private fun DualAppStatusPager(
     }
 }
 
-// ── App tab ───────────────────────────────────────────────────────────────────
-
-@Composable
-private fun AppTab(
-    selected: Boolean,
-    label:    String,
-    onClick:  () -> Unit
-) {
-    Tab(
-        selected = selected,
-        onClick  = onClick,
-        text     = {
-            Text(
-                text       = label,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
-            )
-        }
-    )
-}
-
 // ── Empty state ───────────────────────────────────────────────────────────────
 
 @Composable
-private fun EmptyPage(appLabel: String, isVideos: Boolean) {
+private fun EmptyPage(isVideos: Boolean) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text(
-            text      = "No ${if (isVideos) "videos" else "images"} from $appLabel.\n" +
-                    "View some statuses in the app first.",
+            text      = "No ${if (isVideos) "videos" else "images"} found.\n" +
+                    "View some statuses in WhatsApp first.",
             textAlign = TextAlign.Center,
             color     = MaterialTheme.colorScheme.onSurfaceVariant,
             style     = MaterialTheme.typography.bodyMedium

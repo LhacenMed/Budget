@@ -7,6 +7,8 @@ import com.lhacenmed.budget.data.model.StatusItem
 import com.lhacenmed.budget.data.model.StatusSource
 import com.lhacenmed.budget.data.repository.StatusSaverRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -20,18 +22,33 @@ data class AppStatuses(
 )
 
 data class StatusUiState(
-    val hasPermission: Boolean        = false,
-    val whatsapp: AppStatuses         = AppStatuses(),
-    val business: AppStatuses         = AppStatuses(),
-    val isLoading: Boolean            = false,
-    val isRefreshingWhatsapp: Boolean = false,
-    val isRefreshingBusiness: Boolean = false,
-    val savingUri: Uri?               = null,
-    val message: String?              = null,
+    val hasPermission: Boolean             = false,
+    val whatsapp: AppStatuses              = AppStatuses(),
+    val business: AppStatuses             = AppStatuses(),
+    /** Which app sources are currently shown. Never empty — VM enforces at least one. */
+    val visibleSources: Set<StatusSource>  = setOf(StatusSource.WHATSAPP, StatusSource.WHATSAPP_BUSINESS),
+    val isLoading: Boolean                 = false,
+    val isRefreshing: Boolean              = false,
+    val savingUri: Uri?                    = null,
+    val message: String?                   = null,
     // Held here so MediaPreviewPage can read it via the shared VM instance
     // without needing to pass a StatusItem through nav arguments
-    val previewItem: StatusItem?      = null
-)
+    val previewItem: StatusItem?           = null
+) {
+    /** Merged images from all visible sources, sorted newest-first. */
+    val images: List<StatusItem> get() {
+        val wa  = if (StatusSource.WHATSAPP          in visibleSources) whatsapp.images else emptyList()
+        val biz = if (StatusSource.WHATSAPP_BUSINESS in visibleSources) business.images else emptyList()
+        return (wa + biz).sortedByDescending { it.name }
+    }
+
+    /** Merged videos from all visible sources, sorted newest-first. */
+    val videos: List<StatusItem> get() {
+        val wa  = if (StatusSource.WHATSAPP          in visibleSources) whatsapp.videos else emptyList()
+        val biz = if (StatusSource.WHATSAPP_BUSINESS in visibleSources) business.videos else emptyList()
+        return (wa + biz).sortedByDescending { it.name }
+    }
+}
 
 @HiltViewModel
 class StatusViewModel @Inject constructor(
@@ -40,6 +57,13 @@ class StatusViewModel @Inject constructor(
 
     private val _state = MutableStateFlow(StatusUiState())
     val state = _state.asStateFlow()
+
+    private var livePollingJob: Job? = null
+
+    companion object {
+        /** Interval between background re-scans while the status tab is active. */
+        private const val LIVE_POLL_INTERVAL_MS = 20_000L
+    }
 
     init {
         val cached = repository.getCachedStatuses()
@@ -66,34 +90,33 @@ class StatusViewModel @Inject constructor(
     fun clearMessage()                 = _state.update { it.copy(message = null)     }
 
     /**
-     * Pull-to-refresh for a single app's folder.
-     * Only re-traverses that app's SAF subtree, leaving the other source untouched.
+     * Toggles a source's visibility. Enforces that at least one source stays visible —
+     * attempting to remove the last visible source is a no-op.
      */
-    fun refresh(source: StatusSource) = viewModelScope.launch {
-        val treeUri = repository.getSavedUri() ?: return@launch
-
-        _state.update {
-            if (source == StatusSource.WHATSAPP) it.copy(isRefreshingWhatsapp = true)
-            else                                 it.copy(isRefreshingBusiness = true)
-        }
-
-        val fresh = repository.getStatusesForSource(treeUri, source)
-        val freshStatuses = AppStatuses(
-            images = fresh.filter { !it.isVideo },
-            videos = fresh.filter {  it.isVideo }
-        )
-
+    fun toggleSource(source: StatusSource) {
         _state.update { s ->
-            if (source == StatusSource.WHATSAPP)
-                s.copy(whatsapp = freshStatuses, isRefreshingWhatsapp = false)
-            else
-                s.copy(business = freshStatuses, isRefreshingBusiness = false)
+            val next = s.visibleSources.toMutableSet()
+            if (source in next && next.size > 1) next.remove(source) else next.add(source)
+            s.copy(visibleSources = next)
         }
+    }
 
-        // Persist merged cache so the next cold start reflects the refresh
-        val wa  = _state.value.whatsapp.images + _state.value.whatsapp.videos
-        val biz = _state.value.business.images + _state.value.business.videos
-        repository.saveCache(wa + biz)
+    /**
+     * Called by the UI when the status tab becomes active or inactive.
+     * Active  → starts a periodic silent re-scan that detects new statuses automatically.
+     * Inactive → cancels the poll to avoid unnecessary background I/O.
+     */
+    fun setActive(active: Boolean) {
+        if (active) startLivePolling() else stopLivePolling()
+    }
+
+    /** Manual pull-to-refresh — full scan, shows the refresh indicator. */
+    fun refresh() = viewModelScope.launch {
+        val treeUri = repository.getSavedUri() ?: return@launch
+        _state.update { it.copy(isRefreshing = true) }
+        val all = repository.getStatuses(treeUri)
+        applyItems(all, isLoading = false)
+        _state.update { it.copy(isRefreshing = false) }
     }
 
     fun saveStatus(item: StatusItem) = viewModelScope.launch {
@@ -107,6 +130,21 @@ class StatusViewModel @Inject constructor(
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
+    private fun startLivePolling() {
+        if (livePollingJob?.isActive == true) return
+        livePollingJob = viewModelScope.launch {
+            while (true) {
+                delay(LIVE_POLL_INTERVAL_MS)
+                repository.getSavedUri()?.let { silentFullRefresh(it) }
+            }
+        }
+    }
+
+    private fun stopLivePolling() {
+        livePollingJob?.cancel()
+        livePollingJob = null
+    }
+
     /** First-time load (no cache): shows spinner, then populates state. */
     private fun fullLoad(treeUri: Uri) = viewModelScope.launch {
         _state.update { it.copy(isLoading = true, hasPermission = true) }
@@ -114,10 +152,10 @@ class StatusViewModel @Inject constructor(
         applyItems(all, isLoading = false)
     }
 
-    /** Background refresh after serving cached data — no spinner shown. */
+    /** Background re-scan — no spinner, applies result regardless of empty/non-empty. */
     private suspend fun silentFullRefresh(treeUri: Uri) {
         val all = repository.getStatuses(treeUri)
-        if (all.isNotEmpty()) applyItems(all, isLoading = false)
+        applyItems(all, isLoading = false)
     }
 
     private fun applyItems(all: List<StatusItem>, isLoading: Boolean) {
@@ -135,5 +173,10 @@ class StatusViewModel @Inject constructor(
                 videos = bizItems.filter { s ->  s.isVideo }
             )
         )}
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        stopLivePolling()
     }
 }

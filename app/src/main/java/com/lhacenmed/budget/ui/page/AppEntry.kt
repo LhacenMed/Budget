@@ -51,6 +51,7 @@ import com.lhacenmed.budget.ui.page.home.HomeContent
 import com.lhacenmed.budget.ui.page.home.HomeViewModel
 import com.lhacenmed.budget.ui.page.status.MediaPreviewScreen
 import com.lhacenmed.budget.ui.page.status.StatusContent
+import com.lhacenmed.budget.ui.page.status.StatusFilterMenu
 import com.lhacenmed.budget.ui.page.status.StatusViewModel
 import kotlinx.coroutines.launch
 
@@ -104,7 +105,7 @@ fun AppEntry() {
 @Composable
 private fun MainScreen(
     onNavigateToBudgetHistory: () -> Unit,
-    onNavigateToAppearance: () -> Unit,
+    onNavigateToAppearance:    () -> Unit,
     onNavigateToStatusPreview: () -> Unit,
     homeViewModel:    HomeViewModel    = hiltViewModel(),
     groceryViewModel: GroceryViewModel = hiltViewModel(),
@@ -130,6 +131,11 @@ private fun MainScreen(
 
     val fabVisible by remember {
         derivedStateOf { listState.firstVisibleItemIndex == 0 || fabMenuExpanded }
+    }
+
+    // Start/stop live polling based on whether the status tab is visible
+    LaunchedEffect(selectedTab) {
+        statusViewModel.setActive(selectedTab == 2)
     }
 
     BackHandler(enabled = fabMenuExpanded) { fabMenuExpanded = false }
@@ -182,6 +188,14 @@ private fun MainScreen(
                                 }
                             }
                         )
+                    },
+                    actions = {
+                        if (selectedTab == 2) {
+                            StatusFilterMenu(
+                                visibleSources = statusState.visibleSources,
+                                onToggle       = statusViewModel::toggleSource
+                            )
+                        }
                     }
                 )
             },
@@ -239,11 +253,11 @@ private fun MainScreen(
                     onAddToSpendings = groceryViewModel::addToSpendings
                 )
                 2 -> StatusContent(
-                    state = statusState,
-                    padding = padding,
+                    state               = statusState,
+                    padding             = padding,
                     onPermissionGranted = statusViewModel::onPermissionGranted,
-                    onSave = statusViewModel::saveStatus,
-                    onItemClick = { item ->
+                    onSave              = statusViewModel::saveStatus,
+                    onItemClick         = { item ->
                         statusViewModel.openPreview(item)
                         onNavigateToStatusPreview()
                     },
