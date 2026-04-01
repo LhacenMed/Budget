@@ -11,6 +11,7 @@ import androidx.core.content.edit
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import com.lhacenmed.budget.data.model.StatusItem
+import com.lhacenmed.budget.data.model.StatusSource
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -40,24 +41,44 @@ class StatusSaverRepository @Inject constructor(
     // ── Read statuses ─────────────────────────────────────────────────────────
 
     /**
-     * Returns all status items from [treeUri].
+     * Returns all status items from both WhatsApp and WhatsApp Business.
      *
-     * The user may have granted access to any level of the WhatsApp folder:
-     *   - Exactly the `.Statuses` folder → read files directly
-     *   - A parent folder (e.g. WhatsApp root, accounts folder, etc.) → scan
-     *     up to 3 levels deep for a folder named ".Statuses"
+     * The user grants access to the Android media root:
+     *   /storage/emulated/0/Android/media/
      *
-     * This handles both path layouts:
-     *   Old: WhatsApp/Media/.Statuses
-     *   New: WhatsApp/accounts/{anyNumber}/Media/.Statuses
+     * Under that root we look for:
+     *   com.whatsapp      → tagged [StatusSource.WHATSAPP]
+     *   com.whatsapp.w4b  → tagged [StatusSource.WHATSAPP_BUSINESS]
+     *
+     * Within each app folder we recursively find the `.Statuses` directory
+     * (handles both old and multi-account path layouts) up to [MAX_SCAN_DEPTH].
+     *
+     * All SAF [DocumentFile.listFiles] calls are dispatched to [Dispatchers.IO]
+     * to avoid blocking the main thread.
      */
-    fun getStatuses(treeUri: Uri): List<StatusItem> = try {
-        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
-        val statusesFolder = findStatusesFolder(root, depth = 0) ?: root
-        readStatusFiles(statusesFolder)
-    } catch (_: Exception) {
-        clearUri()
-        emptyList()
+    suspend fun getStatuses(treeUri: Uri): List<StatusItem> = withContext(Dispatchers.IO) {
+        try {
+            val root   = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
+            val waDir  = root.findFile(PACKAGE_WHATSAPP)
+            val bizDir = root.findFile(PACKAGE_WHATSAPP_BUSINESS)
+
+            val waItems  = waDir?.let  { readFromAppRoot(it, StatusSource.WHATSAPP)          } ?: emptyList()
+            val bizItems = bizDir?.let { readFromAppRoot(it, StatusSource.WHATSAPP_BUSINESS) } ?: emptyList()
+
+            waItems + bizItems
+        } catch (_: Exception) {
+            clearUri()
+            emptyList()
+        }
+    }
+
+    /**
+     * Finds the `.Statuses` folder within an app's media directory,
+     * then reads and returns all valid status files from it.
+     */
+    private fun readFromAppRoot(appDir: DocumentFile, source: StatusSource): List<StatusItem> {
+        val statusesFolder = findStatusesFolder(appDir, depth = 0) ?: return emptyList()
+        return readStatusFiles(statusesFolder, source)
     }
 
     /**
@@ -69,7 +90,6 @@ class StatusSaverRepository @Inject constructor(
         for (file in dir.listFiles()) {
             if (file.isDirectory) {
                 if (file.name == STATUSES_FOLDER_NAME) return file
-                // Recurse into subdirectories
                 val found = findStatusesFolder(file, depth + 1)
                 if (found != null) return found
             }
@@ -77,14 +97,14 @@ class StatusSaverRepository @Inject constructor(
         return null
     }
 
-    private fun readStatusFiles(folder: DocumentFile): List<StatusItem> =
+    private fun readStatusFiles(folder: DocumentFile, source: StatusSource): List<StatusItem> =
         folder.listFiles()
             .filter { it.isFile && it.name != null }
             .mapNotNull { file ->
                 val name = file.name ?: return@mapNotNull null
                 when {
-                    name.isImage() -> StatusItem(file.uri, name, isVideo = false)
-                    name.isVideo() -> StatusItem(file.uri, name, isVideo = true)
+                    name.isImage() -> StatusItem(file.uri, name, isVideo = false, source = source)
+                    name.isVideo() -> StatusItem(file.uri, name, isVideo = true,  source = source)
                     else           -> null
                 }
             }
@@ -137,19 +157,25 @@ class StatusSaverRepository @Inject constructor(
             endsWith(".mkv", true)
 
     companion object {
-        private const val KEY_URI             = "tree_uri"
-        private const val STATUSES_FOLDER_NAME = ".Statuses"
-        private const val MAX_SCAN_DEPTH      = 3
+        private const val KEY_URI                   = "tree_uri"
+        private const val STATUSES_FOLDER_NAME      = ".Statuses"
+        private const val MAX_SCAN_DEPTH            = 4
+        private const val PACKAGE_WHATSAPP          = "com.whatsapp"
+        private const val PACKAGE_WHATSAPP_BUSINESS = "com.whatsapp.w4b"
 
         /**
-         * Picker hint: starts the folder picker at the WhatsApp root.
-         * Works for both old and new (multi-account) layouts — the user
-         * navigates from here to whichever .Statuses folder they need,
-         * or simply grants the root and we auto-discover .Statuses inside.
+         * Picker initial URI hint pointing at Android/media/.
+         *
+         * Must be a `document/` URI (not `tree/`) — that is what
+         * [Intent.EXTRA_INITIAL_URI] requires for [Intent.ACTION_OPEN_DOCUMENT_TREE].
+         * A `tree/` URI is silently ignored by the picker and it falls back
+         * to its default root, which is why the picker was not opening here.
+         *
+         * primary%3AAndroid%2Fmedia = URL-encoded "primary:Android/media"
          */
-        val WHATSAPP_ROOT_URI: Uri = (
-                "content://com.android.externalstorage.documents/tree/" +
-                        "primary%3AAndroid%2Fmedia%2Fcom.whatsapp"
+        val ANDROID_MEDIA_ROOT_URI: Uri = (
+                "content://com.android.externalstorage.documents/document/" +
+                        "primary%3AAndroid%2Fmedia"
                 ).toUri()
     }
 }

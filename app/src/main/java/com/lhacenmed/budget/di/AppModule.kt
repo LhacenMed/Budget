@@ -36,7 +36,9 @@ object AppModule {
     ) {
         install(Auth) {
             autoLoadFromStorage = true
-            alwaysAutoRefresh = false
+            // Must be true — the SDK silently refreshes short-lived JWTs in the background.
+            // false was the root cause of expired-token errors after connectivity restores.
+            alwaysAutoRefresh = true
         }
         install(Postgrest)
     }
@@ -56,6 +58,6 @@ object AppModule {
         SpendingRepository(client, db)
 
     @Provides fun providePendingItemDao(db: AppDatabase): PendingItemDao = db.pendingItemDao()
-    @Provides fun provideGroceryDao(db: AppDatabase): GroceryDao           = db.groceryDao()
-    @Provides fun provideCacheDao(db: AppDatabase): CacheDao               = db.cacheDao()
+    @Provides fun provideGroceryDao(db: AppDatabase): GroceryDao         = db.groceryDao()
+    @Provides fun provideCacheDao(db: AppDatabase): CacheDao             = db.cacheDao()
 }

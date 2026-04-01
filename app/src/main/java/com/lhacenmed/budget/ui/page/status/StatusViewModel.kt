@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lhacenmed.budget.data.model.StatusItem
+import com.lhacenmed.budget.data.model.StatusSource
 import com.lhacenmed.budget.data.repository.StatusSaverRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,10 +13,16 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+/** Statuses for a single app, split by media type. */
+data class AppStatuses(
+    val images: List<StatusItem> = emptyList(),
+    val videos: List<StatusItem> = emptyList()
+)
+
 data class StatusUiState(
     val hasPermission: Boolean   = false,
-    val images: List<StatusItem> = emptyList(),
-    val videos: List<StatusItem> = emptyList(),
+    val whatsapp: AppStatuses    = AppStatuses(),
+    val business: AppStatuses    = AppStatuses(),
     val isLoading: Boolean       = false,
     val savingUri: Uri?          = null,
     val message: String?         = null,
@@ -40,8 +47,9 @@ class StatusViewModel @Inject constructor(
         load(uri)
     }
 
-    fun openPreview(item: StatusItem) = _state.update { it.copy(previewItem = item) }
-    fun closePreview() = _state.update { it.copy(previewItem = null) }
+    fun openPreview(item: StatusItem)  = _state.update { it.copy(previewItem = item) }
+    fun closePreview()                 = _state.update { it.copy(previewItem = null) }
+    fun clearMessage()                 = _state.update { it.copy(message = null)     }
 
     fun saveStatus(item: StatusItem) = viewModelScope.launch {
         _state.update { it.copy(savingUri = item.uri) }
@@ -52,16 +60,27 @@ class StatusViewModel @Inject constructor(
         )}
     }
 
-    fun clearMessage() = _state.update { it.copy(message = null) }
-
     private fun load(treeUri: Uri) = viewModelScope.launch {
         _state.update { it.copy(isLoading = true, hasPermission = true) }
+
+        // getStatuses is suspend and dispatches to Dispatchers.IO internally,
+        // so this coroutine safely awaits the result without blocking the main thread.
         val all = repository.getStatuses(treeUri)
+
+        val waItems  = all.filter { it.source == StatusSource.WHATSAPP }
+        val bizItems = all.filter { it.source == StatusSource.WHATSAPP_BUSINESS }
+
         _state.update { it.copy(
             isLoading     = false,
             hasPermission = all.isNotEmpty() || repository.getSavedUri() != null,
-            images        = all.filter { s -> !s.isVideo },
-            videos        = all.filter { s ->  s.isVideo }
+            whatsapp      = AppStatuses(
+                images = waItems.filter  { s -> !s.isVideo },
+                videos = waItems.filter  { s ->  s.isVideo }
+            ),
+            business      = AppStatuses(
+                images = bizItems.filter { s -> !s.isVideo },
+                videos = bizItems.filter { s ->  s.isVideo }
+            )
         )}
     }
 }
