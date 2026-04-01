@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.core.content.edit
 import androidx.core.net.toUri
@@ -82,6 +83,51 @@ class StatusSaverRepository @Inject constructor(
 
     private fun clearCache() = prefs.edit { remove(KEY_CACHE) }
 
+    // ── Path resolution for FileObserver ─────────────────────────────────────
+
+    /**
+     * Resolves the real filesystem paths of each app's `.Statuses` directory
+     * from the granted SAF [treeUri], so they can be watched by [android.os.FileObserver].
+     *
+     * SAF document IDs for primary storage follow the pattern:
+     *   `primary:Android/media/com.whatsapp/WhatsApp/Media/.Statuses`
+     * which maps to:
+     *   `/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/.Statuses`
+     *
+     * Returns an empty list if no `.Statuses` folders are found or the paths
+     * cannot be resolved (e.g. secondary storage with unknown volume name).
+     */
+    suspend fun resolveStatusFolderPaths(treeUri: Uri): List<String> = withContext(Dispatchers.IO) {
+        try {
+            val root  = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
+            val paths = mutableListOf<String>()
+
+            listOf(PACKAGE_WHATSAPP to StatusSource.WHATSAPP,
+                PACKAGE_WHATSAPP_BUSINESS to StatusSource.WHATSAPP_BUSINESS
+            ).forEach { (pkg, _) ->
+                val appDir        = root.findFile(pkg) ?: return@forEach
+                val statusesFolder = findStatusesFolder(appDir, depth = 0) ?: return@forEach
+                val realPath      = documentUriToPath(statusesFolder.uri) ?: return@forEach
+                paths.add(realPath)
+            }
+            paths
+        } catch (_: Exception) { emptyList() }
+    }
+
+    /**
+     * Converts a SAF document URI to its real filesystem path.
+     *
+     * External storage document IDs are formatted as `volume:relative/path`.
+     * "primary" maps to `/storage/emulated/0`; other volumes use `/storage/<volumeId>`.
+     */
+    private fun documentUriToPath(uri: Uri): String? = try {
+        val docId = DocumentsContract.getDocumentId(uri)
+        val parts = docId.split(":")
+        if (parts.size != 2) null
+        else if (parts[0] == "primary") "/storage/emulated/0/${parts[1]}"
+        else "/storage/${parts[0]}/${parts[1]}"
+    } catch (_: Exception) { null }
+
     // ── Read statuses ─────────────────────────────────────────────────────────
 
     /**
@@ -93,7 +139,7 @@ class StatusSaverRepository @Inject constructor(
      */
     suspend fun getStatuses(treeUri: Uri): List<StatusItem> = withContext(Dispatchers.IO) {
         try {
-            val root   = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
+            val root = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
 
             // Launch both subtree scans concurrently
             val waDeferred  = async { root.findFile(PACKAGE_WHATSAPP)?.let          { readFromAppRoot(it, StatusSource.WHATSAPP)          } ?: emptyList() }
@@ -111,7 +157,7 @@ class StatusSaverRepository @Inject constructor(
 
     /**
      * Partial scan — only the folder belonging to [source].
-     * Used by [StatusViewModel] for background live-polling of a single source.
+     * Used by [StatusViewModel.refresh] for parallel manual pull-to-refresh.
      */
     suspend fun getStatusesForSource(treeUri: Uri, source: StatusSource): List<StatusItem> =
         withContext(Dispatchers.IO) {
