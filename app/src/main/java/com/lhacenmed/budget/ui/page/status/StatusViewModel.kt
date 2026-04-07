@@ -30,31 +30,32 @@ data class AppStatuses(
 )
 
 data class StatusUiState(
-    val hasPermission: Boolean            = false,
-    val whatsapp: AppStatuses             = AppStatuses(),
-    val business: AppStatuses             = AppStatuses(),
+    val hasPermission:  Boolean           = false,
+    val whatsapp:       AppStatuses       = AppStatuses(),
+    val business:       AppStatuses       = AppStatuses(),
     /** Which app sources are currently shown. Never empty — VM enforces at least one. */
     val visibleSources: Set<StatusSource> = setOf(StatusSource.WHATSAPP, StatusSource.WHATSAPP_BUSINESS),
-    val isLoading: Boolean                = false,
-    val isRefreshing: Boolean             = false,
-    val savingUri: Uri?                   = null,
-    val message: String?                  = null,
-    // Held here so MediaPreviewPage can read it via the shared VM instance
-    // without needing to pass a StatusItem through nav arguments
-    val previewItem: StatusItem?          = null
+    val isLoading:      Boolean           = false,
+    val isRefreshing:   Boolean           = false,
+    val savingUri:      Uri?              = null,
+    val message:        String?           = null,
+    // Held here so MediaPreviewScreen can read a stable snapshot via the shared VM instance
+    // without needing to pass a StatusItem through nav arguments.
+    val previewList:    List<StatusItem>  = emptyList(),
+    val previewIndex:   Int               = 0
 ) {
-    /** Merged images from all visible sources, sorted newest-first. */
+    /** Merged images from all visible sources, sorted newest-first by last-modified date. */
     val images: List<StatusItem> get() {
         val wa  = if (StatusSource.WHATSAPP          in visibleSources) whatsapp.images else emptyList()
         val biz = if (StatusSource.WHATSAPP_BUSINESS in visibleSources) business.images else emptyList()
-        return (wa + biz).sortedByDescending { it.name }
+        return (wa + biz).sortedByDescending { it.lastModified }
     }
 
-    /** Merged videos from all visible sources, sorted newest-first. */
+    /** Merged videos from all visible sources, sorted newest-first by last-modified date. */
     val videos: List<StatusItem> get() {
         val wa  = if (StatusSource.WHATSAPP          in visibleSources) whatsapp.videos else emptyList()
         val biz = if (StatusSource.WHATSAPP_BUSINESS in visibleSources) business.videos else emptyList()
-        return (wa + biz).sortedByDescending { it.name }
+        return (wa + biz).sortedByDescending { it.lastModified }
     }
 }
 
@@ -116,9 +117,20 @@ class StatusViewModel @Inject constructor(
         viewModelScope.launch { boot(uri) }
     }
 
-    fun openPreview(item: StatusItem)  = _state.update { it.copy(previewItem = item) }
-    fun closePreview()                 = _state.update { it.copy(previewItem = null) }
-    fun clearMessage()                 = _state.update { it.copy(message = null)     }
+    /**
+     * Stores a snapshot of the current visible list for the preview screen.
+     * Captures either [StatusUiState.images] or [StatusUiState.videos] depending on [item.isVideo],
+     * and computes the item's index within that list so the pager can open at the right page.
+     */
+    fun openPreview(item: StatusItem) {
+        val list  = if (item.isVideo) _state.value.videos else _state.value.images
+        val index = list.indexOfFirst { it.uri == item.uri }.coerceAtLeast(0)
+        _state.update { it.copy(previewList = list, previewIndex = index) }
+    }
+
+    fun closePreview() = _state.update { it.copy(previewList = emptyList(), previewIndex = 0) }
+
+    fun clearMessage() = _state.update { it.copy(message = null) }
 
     /**
      * Toggles a source's visibility. Enforces that at least one source stays visible —
@@ -247,6 +259,8 @@ class StatusViewModel @Inject constructor(
      *
      * The [repository] constructs the content URI from [WatchedFolder.folderDocId] +
      * filename — pure [android.provider.DocumentsContract] string math, no SAF traversal.
+     * [StatusItem.lastModified] is set to [System.currentTimeMillis] so new items
+     * sort to the top of the date-ordered computed list immediately.
      *
      * Duplicate guard: WhatsApp fires both CLOSE_WRITE and MOVED_TO for the same file
      * (temp-file → rename sequence). The name-equality check silently drops the second event.

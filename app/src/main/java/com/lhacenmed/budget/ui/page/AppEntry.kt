@@ -81,20 +81,27 @@ fun AppEntry() {
             DarkThemePage(onNavigateBack = { navController.popBackStack() })
         }
         animatedComposable(Route.STATUS_PREVIEW) {
-            val homeEntry = remember(navController) { navController.getBackStackEntry(Route.HOME) }
-            val statusViewModel: StatusViewModel = hiltViewModel(homeEntry)
-            val state by statusViewModel.state.collectAsStateWithLifecycle()
-            val item  = remember { state.previewItem } ?: return@animatedComposable
+            val homeEntry       = remember(navController) { navController.getBackStackEntry(Route.HOME) }
+            val statusViewModel = hiltViewModel<StatusViewModel>(homeEntry)
+            val state           by statusViewModel.state.collectAsStateWithLifecycle()
+
+            // Capture the snapshot once on entry — the list and index are stable
+            // for the lifetime of this destination (set by openPreview before navigation).
+            val items        = remember { state.previewList }
+            val initialIndex = remember { state.previewIndex }
+
+            if (items.isEmpty()) return@animatedComposable
 
             DisposableEffect(Unit) {
                 onDispose { statusViewModel.closePreview() }
             }
 
             MediaPreviewScreen(
-                item     = item,
-                isSaving = state.savingUri == item.uri,
-                onBack   = { navController.popBackStack() },
-                onSave   = { statusViewModel.saveStatus(item) }
+                items        = items,
+                initialIndex = initialIndex,
+                savingUri    = state.savingUri,
+                onBack       = { navController.popBackStack() },
+                onSave       = { item -> statusViewModel.saveStatus(item) }
             )
         }
     }

@@ -5,8 +5,9 @@ import android.net.Uri
 enum class StatusSource { WHATSAPP, WHATSAPP_BUSINESS }
 
 data class StatusItem(
-    val uri:     Uri,
-    val name:    String,
+    val uri: Uri,
+    val name: String,
     val isVideo: Boolean,
-    val source:  StatusSource
+    val source: StatusSource,
+    val lastModified: Long = 0L
 )

@@ -77,10 +77,11 @@ class StatusSaverRepository @Inject constructor(
             (0 until array.length()).mapNotNull { i ->
                 val obj = array.getJSONObject(i)
                 StatusItem(
-                    uri     = obj.getString("uri").toUri(),
-                    name    = obj.getString("name"),
-                    isVideo = obj.getBoolean("isVideo"),
-                    source  = StatusSource.valueOf(obj.getString("source"))
+                    uri          = obj.getString("uri").toUri(),
+                    name         = obj.getString("name"),
+                    isVideo      = obj.getBoolean("isVideo"),
+                    source       = StatusSource.valueOf(obj.getString("source")),
+                    lastModified = obj.optLong("lastModified", 0L)
                 )
             }
         } catch (_: Exception) { emptyList() }
@@ -94,10 +95,11 @@ class StatusSaverRepository @Inject constructor(
         val array = JSONArray()
         items.forEach { item ->
             array.put(JSONObject().apply {
-                put("uri",     item.uri.toString())
-                put("name",    item.name)
-                put("isVideo", item.isVideo)
-                put("source",  item.source.name)
+                put("uri",          item.uri.toString())
+                put("name",         item.name)
+                put("isVideo",      item.isVideo)
+                put("source",       item.source.name)
+                put("lastModified", item.lastModified)
             })
         }
         prefs.edit { putString(KEY_CACHE, array.toString()) }
@@ -214,6 +216,9 @@ class StatusSaverRepository @Inject constructor(
      * Constructs a [StatusItem] for a single newly-detected file with zero I/O —
      * pure [DocumentsContract] string math on [WatchedFolder.folderDocId] + [fileName].
      *
+     * Uses [System.currentTimeMillis] as [StatusItem.lastModified] so real-time additions
+     * sort to the top of the list immediately.
+     *
      * Used by the real-time [com.lhacenmed.budget.data.util.FolderChange.Added] handler.
      * Returns null for unrecognised extensions (e.g. `.tmp` temp files).
      */
@@ -224,10 +229,11 @@ class StatusSaverRepository @Inject constructor(
             "${folder.folderDocId}/$fileName"
         )
         return StatusItem(
-            uri     = childUri,
-            name    = fileName,
-            isVideo = fileName.isVideo(),
-            source  = folder.source
+            uri          = childUri,
+            name         = fileName,
+            isVideo      = fileName.isVideo(),
+            source       = folder.source,
+            lastModified = System.currentTimeMillis()
         )
     }
 
@@ -274,6 +280,9 @@ class StatusSaverRepository @Inject constructor(
     /**
      * Issues a single [ContentResolver.query] for all children of [folderDocId].
      *
+     * Queries [DocumentsContract.Document.COLUMN_LAST_MODIFIED] so items can be
+     * sorted by creation date (newest first) without any additional I/O.
+     *
      * [DocumentsContract.buildChildDocumentsUriUsingTree] + [ContentResolver.query]
      * costs **one binder IPC** regardless of file count.
      * [DocumentFile.listFiles] costs **one IPC per file** — O(N) vs O(1).
@@ -289,7 +298,8 @@ class StatusSaverRepository @Inject constructor(
             arrayOf(
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_LAST_MODIFIED
             ),
             null, null, null
         ) ?: return emptyList()
@@ -297,15 +307,16 @@ class StatusSaverRepository @Inject constructor(
         return cursor.use { c ->
             buildList {
                 while (c.moveToNext()) {
-                    val name = c.getString(1) ?: continue
-                    val mime = c.getString(2) ?: continue
+                    val name         = c.getString(1) ?: continue
+                    val mime         = c.getString(2) ?: continue
+                    val lastModified = c.getLong(3)
                     if (mime == DocumentsContract.Document.MIME_TYPE_DIR) continue
                     if (!name.isImage() && !name.isVideo()) continue
                     val docId = c.getString(0)
                     val uri   = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                    add(StatusItem(uri, name, name.isVideo(), source))
+                    add(StatusItem(uri, name, name.isVideo(), source, lastModified))
                 }
-            }.sortedByDescending { it.name }
+            }.sortedByDescending { it.lastModified }
         }
     }
 
