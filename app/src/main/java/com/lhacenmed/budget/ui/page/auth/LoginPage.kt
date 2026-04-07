@@ -19,7 +19,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.res.stringResource
 import com.lhacenmed.budget.R
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun LoginPage(
     onNavigateToRegister: () -> Unit,
@@ -35,7 +35,19 @@ fun LoginPage(
         state.error?.let { snackbarHostState.showSnackbar(it); viewModel.clearError() }
     }
 
-    Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { padding ->
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            TopAppBar(
+                title = {},
+                actions = {
+                    TextButton(onClick = { viewModel.skipAuth() }) {
+                        Text("Skip", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            )
+        }
+    ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()

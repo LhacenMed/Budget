@@ -35,6 +35,7 @@ data class HomeUiState(
     val totalSpent: Float = 0f,
     val currentUserName: String = "",
     val currentUserEmail: String = "",
+    val isAuthenticated: Boolean = false,
     val isOnline: Boolean = true,
     val isRefreshing: Boolean = false,
     val pendingCount: Int = 0,
@@ -137,12 +138,16 @@ class HomeViewModel @Inject constructor(
     // ── Private ───────────────────────────────────────────────────────────────
 
     private fun loadCurrentUser() {
-        val user = supabase.auth.currentUserOrNull() ?: return
+        val user = supabase.auth.currentUserOrNull()
+        if (user == null) {
+            _state.update { it.copy(isAuthenticated = false) }
+            return
+        }
         val name = user.userMetadata
             ?.get("display_name")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
             ?: user.email?.substringBefore("@")
             ?: "Me"
-        _state.update { it.copy(currentUserName = name, currentUserEmail = user.email.orEmpty()) }
+        _state.update { it.copy(currentUserName = name, currentUserEmail = user.email.orEmpty(), isAuthenticated = true) }
     }
 
     private fun observeConnectivity() = viewModelScope.launch {

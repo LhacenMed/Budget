@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import com.lhacenmed.budget.util.PreferenceUtil
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.auth.auth
@@ -12,9 +13,10 @@ import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -34,24 +36,31 @@ class SessionOrchestrator @Inject constructor(
      * Single source of truth for top-level auth navigation.
      * Eagerly shared so the gate is ready before the first collector.
      */
-    val authGate: StateFlow<AuthGate> = supabase.auth.sessionStatus
-        .map { status ->
-            when (status) {
-                is SessionStatus.Initializing     -> AuthGate.Loading
-                is SessionStatus.Authenticated    -> AuthGate.App
-                is SessionStatus.NotAuthenticated -> AuthGate.Auth
-                is SessionStatus.RefreshFailure   -> resolveRefreshFailure()
-            }
+    val authGate: StateFlow<AuthGate> = combine(
+        supabase.auth.sessionStatus,
+        PreferenceUtil.authSkipped
+    ) { status, skipped ->
+        when {
+            status is SessionStatus.Authenticated    -> AuthGate.App
+            skipped                                  -> AuthGate.App
+            status is SessionStatus.Initializing     -> AuthGate.Loading
+            status is SessionStatus.NotAuthenticated -> AuthGate.Auth
+            status is SessionStatus.RefreshFailure   -> resolveRefreshFailure()
+            else                                     -> AuthGate.Auth
         }
-        .stateIn(
-            scope        = scope,
-            started      = SharingStarted.Eagerly,
-            initialValue = AuthGate.Loading
-        )
+    }.stateIn(
+        scope        = scope,
+        started      = SharingStarted.Eagerly,
+        initialValue = AuthGate.Loading
+    )
 
     init {
         watchConnectivityForSessionRecovery()
     }
+
+    fun skipAuth() { PreferenceUtil.setAuthSkipped(true) }
+
+    fun resetSkip() { PreferenceUtil.setAuthSkipped(false) }
 
     /**
      * Core fix:

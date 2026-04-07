@@ -33,6 +33,7 @@ import java.time.LocalDate
 fun GroceryContent(
     items: List<GroceryItem>,
     shopperName: String,
+    isAuthenticated: Boolean,
     padding: PaddingValues,
     onToggle: (GroceryItem) -> Unit,
     onDelete: (Int) -> Unit,
@@ -103,9 +104,9 @@ fun GroceryContent(
                         fontWeight = FontWeight.SemiBold,
                         color      = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    // Only show button if at least one done item is parseable
+                    // Only show button if authenticated AND at least one done item is parseable
                     val parseable = done.mapNotNull { parseGroceryName(it.name) }
-                    if (parseable.isNotEmpty()) {
+                    if (isAuthenticated && parseable.isNotEmpty()) {
                         TextButton(
                             onClick      = { showConfirmSheet = true },
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)

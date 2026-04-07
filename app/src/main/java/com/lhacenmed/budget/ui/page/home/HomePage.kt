@@ -29,7 +29,8 @@ fun HomeContent(
     onDelete: (DisplaySpendingItem) -> Unit,
     onRetry: (Int) -> Unit,
     onAddFunds: () -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onNavigateToAuth: () -> Unit
 ) {
     if (state.isLoading) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -39,6 +40,14 @@ fun HomeContent(
     }
 
     Column(Modifier.padding(padding).fillMaxSize()) {
+        if (!state.isAuthenticated) {
+            AuthPlaceholder(
+                message = "Sign in to track your spendings and sync with others.",
+                onNavigateToAuth = onNavigateToAuth
+            )
+            return@Column
+        }
+
         if (!state.isOnline || state.pendingCount > 0) {
             Surface(color = MaterialTheme.colorScheme.tertiaryContainer) {
                 Text(
@@ -250,6 +259,26 @@ private fun SpendingItemCard(
                 Icon(Icons.Default.Delete, contentDescription = "Delete",
                     tint = MaterialTheme.colorScheme.error)
             }
+        }
+    }
+}
+
+@Composable
+fun AuthPlaceholder(message: String, onNavigateToAuth: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onNavigateToAuth) {
+            Text("Sign In / Register")
         }
     }
 }

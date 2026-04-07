@@ -24,10 +24,11 @@ import javax.inject.Inject
 class GroceryViewModel @Inject constructor(
     private val groceryRepository: GroceryRepository,
     private val spendingRepository: SpendingRepository,
-    supabase: SupabaseClient
+    private val supabase: SupabaseClient
 ) : ViewModel() {
 
     private val userId = supabase.auth.currentUserOrNull()?.id.orEmpty()
+    val isAuthenticated: Boolean = supabase.auth.currentUserOrNull() != null
 
     val shopperName: String = run {
         val user = supabase.auth.currentUserOrNull() ?: return@run "Me"

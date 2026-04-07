@@ -60,16 +60,20 @@ import kotlinx.coroutines.launch
 @Composable
 fun AppEntry() {
     val navController = rememberNavController()
+    val authViewModel: AuthViewModel = hiltViewModel()
     NavHost(navController = navController, startDestination = Route.HOME) {
         animatedComposable(Route.HOME) {
             MainScreen(
                 onNavigateToBudgetHistory = { navController.navigate(Route.BUDGET_HISTORY) },
                 onNavigateToAppearance    = { navController.navigate(Route.APPEARANCE) },
-                onNavigateToStatusPreview = { navController.navigate(Route.STATUS_PREVIEW) },
+                onNavigateToStatusPreview = { navController.navigate(Route.STATUS_PREVIEW) }
             )
         }
         animatedComposable(Route.BUDGET_HISTORY) {
-            BudgetHistoryPage(onNavigateBack = { navController.popBackStack() })
+            BudgetHistoryPage(
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateToAuth = { authViewModel.resetSkip() }
+            )
         }
         animatedComposable(Route.APPEARANCE) {
             AppearancePage(
@@ -147,17 +151,19 @@ private fun MainScreen(
         gesturesEnabled = selectedTab != 2 || drawerState.currentValue == DrawerValue.Open,
         drawerContent   = {
             AppDrawer(
-                days        = homeState.days,
-                selectedDay = homeState.selectedDay,
-                userName    = homeState.currentUserName,
-                userEmail   = homeState.currentUserEmail,
-                onDayClick  = { day ->
+                days            = homeState.days,
+                selectedDay     = homeState.selectedDay,
+                userName        = homeState.currentUserName,
+                userEmail       = homeState.currentUserEmail,
+                isAuthenticated = homeState.isAuthenticated,
+                onDayClick      = { day ->
                     homeViewModel.selectDay(day)
                     scope.launch { drawerState.close() }
                 },
                 onBudgetHistory = { scope.launch { drawerState.close() }; onNavigateToBudgetHistory() },
                 onAppearance    = { scope.launch { drawerState.close() }; onNavigateToAppearance() },
-                onSignOut       = { authViewModel.signOut() }
+                onSignOut       = { authViewModel.signOut() },
+                onLogin         = { authViewModel.resetSkip() }
             )
         }
     ) {
@@ -237,17 +243,19 @@ private fun MainScreen(
         ) { padding ->
             when (selectedTab) {
                 0 -> HomeContent(
-                    state      = homeState,
-                    padding    = padding,
-                    listState  = listState,
-                    onDelete   = homeViewModel::deleteItem,
-                    onRetry    = homeViewModel::retryItem,
-                    onAddFunds = { showAddFunds = true },
-                    onRefresh  = homeViewModel::refresh
+                    state           = homeState,
+                    padding         = padding,
+                    listState       = listState,
+                    onDelete        = homeViewModel::deleteItem,
+                    onRetry         = homeViewModel::retryItem,
+                    onAddFunds      = { showAddFunds = true },
+                    onRefresh       = homeViewModel::refresh,
+                    onNavigateToAuth = { authViewModel.resetSkip() }
                 )
                 1 -> GroceryContent(
                     items            = groceryItems,
                     shopperName      = groceryViewModel.shopperName,
+                    isAuthenticated  = groceryViewModel.isAuthenticated,
                     padding          = padding,
                     onToggle         = groceryViewModel::toggleItem,
                     onDelete         = groceryViewModel::deleteItem,

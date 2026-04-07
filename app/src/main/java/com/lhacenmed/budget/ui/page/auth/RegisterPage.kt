@@ -49,6 +49,11 @@ fun RegisterPage(
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    TextButton(onClick = { viewModel.skipAuth() }) {
+                        Text("Skip", fontWeight = FontWeight.SemiBold)
+                    }
                 }
             )
         }

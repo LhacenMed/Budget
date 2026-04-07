@@ -18,11 +18,20 @@ data class AuthUiState(
 
 @HiltViewModel
 class AuthViewModel @Inject constructor(
-    private val supabase: SupabaseClient
+    private val supabase: SupabaseClient,
+    private val sessionOrchestrator: SessionOrchestrator
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AuthUiState())
     val state = _state.asStateFlow()
+
+    fun skipAuth() {
+        sessionOrchestrator.skipAuth()
+    }
+
+    fun resetSkip() {
+        sessionOrchestrator.resetSkip()
+    }
 
     fun login(email: String, password: String) = viewModelScope.launch {
         _state.value = AuthUiState(isLoading = true)
@@ -51,6 +60,7 @@ class AuthViewModel @Inject constructor(
 
     fun signOut() = viewModelScope.launch {
         runCatching { supabase.auth.signOut() }
+        sessionOrchestrator.resetSkip()
     }
 
     fun clearError() { _state.value = _state.value.copy(error = null) }

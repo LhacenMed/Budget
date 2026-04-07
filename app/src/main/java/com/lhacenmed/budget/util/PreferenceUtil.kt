@@ -37,12 +37,16 @@ object PreferenceUtil {
     private val KEY_COLOR_INDEX             = intPreferencesKey("theme_color_index")
     private val KEY_SHOW_WHATSAPP           = booleanPreferencesKey("show_whatsapp")
     private val KEY_SHOW_WHATSAPP_BUSINESS  = booleanPreferencesKey("show_whatsapp_business")
+    private val KEY_AUTH_SKIPPED            = booleanPreferencesKey("auth_skipped")
 
     private val _darkThemePreference   = MutableStateFlow(DEFAULT_DARK_THEME)
     val darkThemePreference: StateFlow<DarkThemePreference> = _darkThemePreference
 
     private val _isDynamicColorEnabled = MutableStateFlow(DEFAULT_DYNAMIC_COLOR)
     val isDynamicColorEnabled: StateFlow<Boolean> = _isDynamicColorEnabled
+
+    private val _authSkipped = MutableStateFlow(false)
+    val authSkipped: StateFlow<Boolean> = _authSkipped
 
     private val _themeColorIndex = MutableStateFlow(DEFAULT_COLOR_INDEX)
     val themeColorIndex: StateFlow<Int> = _themeColorIndex
@@ -62,6 +66,7 @@ object PreferenceUtil {
                 )
                 _isDynamicColorEnabled.value = prefs[KEY_DYNAMIC_COLOR] ?: DEFAULT_DYNAMIC_COLOR
                 _themeColorIndex.value       = prefs[KEY_COLOR_INDEX]   ?: DEFAULT_COLOR_INDEX
+                _authSkipped.value           = prefs[KEY_AUTH_SKIPPED]  ?: false
 
                 val showWa  = prefs[KEY_SHOW_WHATSAPP]          ?: DEFAULT_SHOW_WHATSAPP
                 val showBiz = prefs[KEY_SHOW_WHATSAPP_BUSINESS]  ?: DEFAULT_SHOW_WHATSAPP_BUSINESS
@@ -109,6 +114,14 @@ object PreferenceUtil {
             dataStore.edit { prefs ->
                 prefs[KEY_SHOW_WHATSAPP]          = StatusSource.WHATSAPP          in sources
                 prefs[KEY_SHOW_WHATSAPP_BUSINESS] = StatusSource.WHATSAPP_BUSINESS in sources
+            }
+        }
+    }
+
+    fun setAuthSkipped(skipped: Boolean) {
+        scope.launch {
+            dataStore.edit { prefs ->
+                prefs[KEY_AUTH_SKIPPED] = skipped
             }
         }
     }

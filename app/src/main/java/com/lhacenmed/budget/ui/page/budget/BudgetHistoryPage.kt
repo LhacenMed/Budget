@@ -41,6 +41,7 @@ private enum class HistoryFilter(val label: String) {
 @Composable
 fun BudgetHistoryPage(
     onNavigateBack: () -> Unit,
+    onNavigateToAuth: () -> Unit,
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -77,6 +78,14 @@ fun BudgetHistoryPage(
                 .padding(padding)
                 .fillMaxSize()
         ) {
+            if (!state.isAuthenticated) {
+                com.lhacenmed.budget.ui.page.home.AuthPlaceholder(
+                    message = "Sign in to view your complete budget history.",
+                    onNavigateToAuth = onNavigateToAuth
+                )
+                return@Column
+            }
+
             SingleChoiceSegmentedButtonRow(
                 modifier = Modifier
                     .fillMaxWidth()
