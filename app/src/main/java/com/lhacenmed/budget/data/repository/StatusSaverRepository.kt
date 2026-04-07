@@ -13,6 +13,7 @@ import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import com.lhacenmed.budget.data.model.StatusItem
 import com.lhacenmed.budget.data.model.StatusSource
+import com.lhacenmed.budget.data.util.WatchedFolder
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -83,50 +84,64 @@ class StatusSaverRepository @Inject constructor(
 
     private fun clearCache() = prefs.edit { remove(KEY_CACHE) }
 
-    // ── Path resolution for FileObserver ─────────────────────────────────────
+    // ── Folder resolution for FileObserver ────────────────────────────────────
 
     /**
-     * Resolves the real filesystem paths of each app's `.Statuses` directory
-     * from the granted SAF [treeUri], so they can be watched by [android.os.FileObserver].
+     * Resolves [WatchedFolder] handles for each app's `.Statuses` directory.
+     *
+     * Each handle carries:
+     * - [WatchedFolder.realPath]    — real filesystem path for [android.os.FileObserver]
+     * - [WatchedFolder.folderDocId] — SAF document ID used for O(1) child URI construction
+     * - [WatchedFolder.treeUri]     — the granted tree URI base
      *
      * SAF document IDs for primary storage follow the pattern:
      *   `primary:Android/media/com.whatsapp/WhatsApp/Media/.Statuses`
      * which maps to:
      *   `/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/.Statuses`
-     *
-     * Returns an empty list if no `.Statuses` folders are found or the paths
-     * cannot be resolved (e.g. secondary storage with unknown volume name).
      */
-    suspend fun resolveStatusFolderPaths(treeUri: Uri): List<String> = withContext(Dispatchers.IO) {
-        try {
-            val root  = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
-            val paths = mutableListOf<String>()
+    suspend fun resolveWatchedFolders(treeUri: Uri): List<WatchedFolder> =
+        withContext(Dispatchers.IO) {
+            try {
+                val root    = DocumentFile.fromTreeUri(context, treeUri)
+                    ?: return@withContext emptyList()
+                val folders = mutableListOf<WatchedFolder>()
 
-            listOf(PACKAGE_WHATSAPP to StatusSource.WHATSAPP,
-                PACKAGE_WHATSAPP_BUSINESS to StatusSource.WHATSAPP_BUSINESS
-            ).forEach { (pkg, _) ->
-                val appDir        = root.findFile(pkg) ?: return@forEach
-                val statusesFolder = findStatusesFolder(appDir, depth = 0) ?: return@forEach
-                val realPath      = documentUriToPath(statusesFolder.uri) ?: return@forEach
-                paths.add(realPath)
-            }
-            paths
-        } catch (_: Exception) { emptyList() }
-    }
+                listOf(
+                    PACKAGE_WHATSAPP          to StatusSource.WHATSAPP,
+                    PACKAGE_WHATSAPP_BUSINESS to StatusSource.WHATSAPP_BUSINESS
+                ).forEach { (pkg, source) ->
+                    val appDir       = root.findFile(pkg) ?: return@forEach
+                    val statusFolder = findStatusesFolder(appDir, depth = 0) ?: return@forEach
+                    val realPath     = documentUriToPath(statusFolder.uri) ?: return@forEach
+                    val folderDocId  = DocumentsContract.getDocumentId(statusFolder.uri)
+                    folders += WatchedFolder(realPath, source, folderDocId, treeUri)
+                }
+                folders
+            } catch (_: Exception) { emptyList() }
+        }
 
     /**
-     * Converts a SAF document URI to its real filesystem path.
+     * Constructs a [StatusItem] for a single newly-detected file using only SAF string math —
+     * no I/O, no directory listing.
      *
-     * External storage document IDs are formatted as `volume:relative/path`.
-     * "primary" maps to `/storage/emulated/0`; other volumes use `/storage/<volumeId>`.
+     * Child document IDs follow the `ExternalStorageProvider` convention:
+     *   `{parentDocId}/{fileName}`  →  `primary:Android/media/…/.Statuses/filename.jpg`
+     *
+     * Returns null if [fileName] is not a recognised media extension (e.g. a `.tmp` temp file).
      */
-    private fun documentUriToPath(uri: Uri): String? = try {
-        val docId = DocumentsContract.getDocumentId(uri)
-        val parts = docId.split(":")
-        if (parts.size != 2) null
-        else if (parts[0] == "primary") "/storage/emulated/0/${parts[1]}"
-        else "/storage/${parts[0]}/${parts[1]}"
-    } catch (_: Exception) { null }
+    fun resolveSingleStatus(folder: WatchedFolder, fileName: String): StatusItem? {
+        if (!fileName.isImage() && !fileName.isVideo()) return null
+        val childUri = DocumentsContract.buildDocumentUriUsingTree(
+            folder.treeUri,
+            "${folder.folderDocId}/$fileName"
+        )
+        return StatusItem(
+            uri     = childUri,
+            name    = fileName,
+            isVideo = fileName.isVideo(),
+            source  = folder.source
+        )
+    }
 
     // ── Read statuses ─────────────────────────────────────────────────────────
 
@@ -157,7 +172,8 @@ class StatusSaverRepository @Inject constructor(
 
     /**
      * Partial scan — only the folder belonging to [source].
-     * Used by [StatusViewModel.refresh] for parallel manual pull-to-refresh.
+     * Used by [com.lhacenmed.budget.ui.page.status.StatusViewModel.refresh]
+     * for parallel manual pull-to-refresh.
      */
     suspend fun getStatusesForSource(treeUri: Uri, source: StatusSource): List<StatusItem> =
         withContext(Dispatchers.IO) {
@@ -246,6 +262,20 @@ class StatusSaverRepository @Inject constructor(
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Converts a SAF document URI to its real filesystem path.
+     *
+     * External storage document IDs are formatted as `volume:relative/path`.
+     * "primary" maps to `/storage/emulated/0`; other volumes use `/storage/<volumeId>`.
+     */
+    private fun documentUriToPath(uri: Uri): String? = try {
+        val docId = DocumentsContract.getDocumentId(uri)
+        val parts = docId.split(":")
+        if (parts.size != 2) null
+        else if (parts[0] == "primary") "/storage/emulated/0/${parts[1]}"
+        else "/storage/${parts[0]}/${parts[1]}"
+    } catch (_: Exception) { null }
 
     private fun String.isImage() = endsWith(".jpg", true) || endsWith(".jpeg", true) ||
             endsWith(".png", true) || endsWith(".webp", true)

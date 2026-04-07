@@ -133,11 +133,6 @@ private fun MainScreen(
         derivedStateOf { listState.firstVisibleItemIndex == 0 || fabMenuExpanded }
     }
 
-    // Start/stop live polling based on whether the status tab is visible
-    LaunchedEffect(selectedTab) {
-        statusViewModel.setActive(selectedTab == 2)
-    }
-
     BackHandler(enabled = fabMenuExpanded) { fabMenuExpanded = false }
 
     ModalNavigationDrawer(

@@ -6,14 +6,20 @@ import androidx.lifecycle.viewModelScope
 import com.lhacenmed.budget.data.model.StatusItem
 import com.lhacenmed.budget.data.model.StatusSource
 import com.lhacenmed.budget.data.repository.StatusSaverRepository
+import com.lhacenmed.budget.data.util.FolderChange
 import com.lhacenmed.budget.data.util.StatusFolderObserver
+import com.lhacenmed.budget.data.util.WatchedFolder
 import com.lhacenmed.budget.util.PreferenceUtil
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -62,28 +68,24 @@ class StatusViewModel @Inject constructor(
     val state = _state.asStateFlow()
 
     /**
-     * Real filesystem paths of the `.Statuses` directories, resolved once from the
-     * SAF tree URI. Populated by [resolvePaths]; used by [startObserving].
+     * Resolved handles for each app's `.Statuses` directory.
+     * Populated by [resolvePaths]; consumed by [startObserving] and [handleAdded].
      */
-    private var observerPaths: List<String> = emptyList()
+    private var watchedFolders: List<WatchedFolder> = emptyList()
 
     /**
-     * Whether the status tab is currently in the foreground.
-     * Tracked so [resolvePaths] can auto-start observation if the tab is already
-     * active by the time path resolution completes.
+     * Coroutine collecting [StatusFolderObserver.changes].
+     * Started once paths are resolved and kept alive for the VM's full lifetime —
+     * observer is never paused between tab switches.
      */
-    private var isTabActive = false
-
-    /** Coroutine collecting [StatusFolderObserver.changes]. Null when tab is inactive. */
     private var observerJob: Job? = null
 
     companion object {
         /**
-         * Debounce window applied to raw inotify events.
-         * WhatsApp writes a file in multiple steps (temp name → rename), so several
-         * events fire per status. Debouncing coalesces them into a single re-scan.
+         * Debounce window applied to [FolderChange.Recheck] events only.
+         * [FolderChange.Added] and [FolderChange.Removed] are applied immediately with zero delay.
          */
-        private const val OBSERVER_DEBOUNCE_MS = 500L
+        private const val RECHECK_DEBOUNCE_MS = 500L
     }
 
     init {
@@ -96,7 +98,8 @@ class StatusViewModel @Inject constructor(
             applyItems(cached, isLoading = false)
             repository.getSavedUri()?.let { uri ->
                 viewModelScope.launch {
-                    // Resolve observer paths and silently refresh in parallel
+                    // Resolve observer paths and silently refresh in parallel.
+                    // startObserving() is called inside resolvePaths once folders are ready.
                     val pathsJob   = launch { resolvePaths(uri) }
                     val refreshJob = launch { silentFullRefresh(uri) }
                     pathsJob.join()
@@ -114,8 +117,8 @@ class StatusViewModel @Inject constructor(
     fun onPermissionGranted(uri: Uri?) {
         if (uri == null) return
         repository.persistUri(uri)
-        // Resolve new paths then load; previous observer (if any) is still stopped
-        // until setActive(true) is called again by the UI
+        // Stop any existing observer before resolving new paths
+        stopObserving()
         resolvePaths(uri)
         fullLoad(uri)
     }
@@ -136,18 +139,6 @@ class StatusViewModel @Inject constructor(
             s.copy(visibleSources = next)
         }
         PreferenceUtil.setVisibleStatusSources(_state.value.visibleSources)
-    }
-
-    /**
-     * Called by the UI when the status tab becomes active or inactive.
-     *
-     * Active  → starts [StatusFolderObserver] collection so any inotify event on
-     *           a `.Statuses` directory triggers an immediate silent re-scan.
-     * Inactive → cancels the observer to release the inotify watch descriptors.
-     */
-    fun setActive(active: Boolean) {
-        isTabActive = active
-        if (active) startObserving() else stopObserving()
     }
 
     /**
@@ -179,37 +170,114 @@ class StatusViewModel @Inject constructor(
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /**
-     * Resolves the real filesystem paths of `.Statuses` directories from [treeUri].
-     * Once resolved, starts observing immediately if the tab is currently active.
+     * Resolves [WatchedFolder] handles from [treeUri], then immediately starts the
+     * inotify observer for the VM's full lifetime regardless of which tab is active.
      */
     private fun resolvePaths(treeUri: Uri) = viewModelScope.launch {
-        observerPaths = repository.resolveStatusFolderPaths(treeUri)
-        if (isTabActive) startObserving()
+        watchedFolders = repository.resolveWatchedFolders(treeUri)
+        startObserving()
     }
 
     /**
-     * Starts collecting [StatusFolderObserver.changes].
-     * Each inotify event is debounced before triggering a silent re-scan, so rapid
-     * multi-event writes (e.g. WhatsApp's temp-file-then-rename sequence) produce
-     * exactly one re-scan.
+     * Starts the [StatusFolderObserver] and routes each [FolderChange] to the
+     * appropriate handler:
+     *
+     * - [FolderChange.Added]   → [handleAdded]   — O(1) URI construction, prepended to state
+     * - [FolderChange.Removed] → [handleRemoved] — item filtered from state by name
+     * - [FolderChange.Recheck] → debounced full re-scan (batch/untracked events only)
      *
      * No-ops if the observer is already running or if no paths have been resolved yet.
      */
+    @OptIn(FlowPreview::class)
     private fun startObserving() {
-        if (observerJob?.isActive == true || observerPaths.isEmpty()) return
+        if (observerJob?.isActive == true || watchedFolders.isEmpty()) return
         observerJob = viewModelScope.launch {
-            StatusFolderObserver(observerPaths)
+            val changes = StatusFolderObserver(watchedFolders)
                 .changes
-                .debounce(OBSERVER_DEBOUNCE_MS)
-                .collect {
-                    repository.getSavedUri()?.let { silentFullRefresh(it) }
+                .shareIn(this, SharingStarted.Eagerly)
+
+            // Incremental updates — immediate, zero I/O
+            launch {
+                changes.collect { change ->
+                    when (change) {
+                        is FolderChange.Added   -> handleAdded(change)
+                        is FolderChange.Removed -> handleRemoved(change)
+                        FolderChange.Recheck    -> Unit
+                    }
                 }
+            }
+
+            // Full re-scan for batch/untracked events — debounced
+            changes
+                .filter { it is FolderChange.Recheck }
+                .debounce(RECHECK_DEBOUNCE_MS)
+                .collect { repository.getSavedUri()?.let { silentFullRefresh(it) } }
         }
     }
 
     private fun stopObserving() {
         observerJob?.cancel()
         observerJob = null
+    }
+
+    /**
+     * Prepends a single newly-detected status to the in-memory list with zero I/O.
+     *
+     * The [repository] constructs the content URI from [WatchedFolder.folderDocId] +
+     * filename — pure [android.provider.DocumentsContract] string math, no SAF traversal.
+     *
+     * Duplicate guard: WhatsApp fires both CLOSE_WRITE and MOVED_TO for the same file
+     * (temp-file → rename sequence). The name-equality check silently drops the second event.
+     */
+    private fun handleAdded(change: FolderChange.Added) {
+        val folder = watchedFolders.find { it.source == change.source } ?: return
+        val item   = repository.resolveSingleStatus(folder, change.fileName) ?: return
+        _state.update { s ->
+            when (item.source) {
+                StatusSource.WHATSAPP -> {
+                    val wa = s.whatsapp
+                    if (item.isVideo) {
+                        if (wa.videos.any { it.name == item.name }) return@update s
+                        s.copy(whatsapp = wa.copy(videos = listOf(item) + wa.videos))
+                    } else {
+                        if (wa.images.any { it.name == item.name }) return@update s
+                        s.copy(whatsapp = wa.copy(images = listOf(item) + wa.images))
+                    }
+                }
+                StatusSource.WHATSAPP_BUSINESS -> {
+                    val biz = s.business
+                    if (item.isVideo) {
+                        if (biz.videos.any { it.name == item.name }) return@update s
+                        s.copy(business = biz.copy(videos = listOf(item) + biz.videos))
+                    } else {
+                        if (biz.images.any { it.name == item.name }) return@update s
+                        s.copy(business = biz.copy(images = listOf(item) + biz.images))
+                    }
+                }
+            }
+        }
+    }
+
+    /** Removes a deleted/moved-out status from the in-memory list by name. */
+    private fun handleRemoved(change: FolderChange.Removed) {
+        _state.update { s ->
+            when (change.source) {
+                StatusSource.WHATSAPP -> {
+                    val wa = s.whatsapp
+                    s.copy(whatsapp = wa.copy(
+                        images = wa.images.filter { it.name != change.fileName },
+                        videos = wa.videos.filter { it.name != change.fileName }
+                    ))
+                }
+                StatusSource.WHATSAPP_BUSINESS -> {
+                    val biz = s.business
+                    s.copy(business = biz.copy(
+                        images = biz.images.filter { it.name != change.fileName },
+                        videos = biz.videos.filter { it.name != change.fileName }
+                    ))
+                }
+            }
+        }
     }
 
     /** First-time load (no cache): shows spinner, then populates state. */
