@@ -111,7 +111,7 @@ android {
                     abiFilterList.firstOrNull()
                 }
                 abiCodes[name]?.let { code ->
-                    output.versionCode.set(code + (output.versionCode.get() ?: 0))
+                    output.versionCode.set(code + output.versionCode.get())
                 }
             }
         }

@@ -13,7 +13,6 @@ import com.lhacenmed.budget.util.PreferenceUtil
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
@@ -69,21 +68,21 @@ class StatusViewModel @Inject constructor(
 
     /**
      * Resolved handles for each app's `.Statuses` directory.
-     * Populated by [resolvePaths]; consumed by [startObserving] and [handleAdded].
+     * Populated by [boot]; consumed by [startObserving], [handleAdded], and [refresh].
      */
     private var watchedFolders: List<WatchedFolder> = emptyList()
 
     /**
      * Coroutine collecting [StatusFolderObserver.changes].
-     * Started once paths are resolved and kept alive for the VM's full lifetime —
-     * observer is never paused between tab switches.
+     * Started once inside [boot] and kept alive for the VM's full lifetime —
+     * the observer is never paused between tab switches.
      */
     private var observerJob: Job? = null
 
     companion object {
         /**
          * Debounce window applied to [FolderChange.Recheck] events only.
-         * [FolderChange.Added] and [FolderChange.Removed] are applied immediately with zero delay.
+         * [FolderChange.Added] and [FolderChange.Removed] are applied immediately.
          */
         private const val RECHECK_DEBOUNCE_MS = 500L
     }
@@ -92,35 +91,29 @@ class StatusViewModel @Inject constructor(
         // Restore persisted source visibility before serving any content
         _state.update { it.copy(visibleSources = PreferenceUtil.visibleStatusSources.value) }
 
-        val cached = repository.getCachedStatuses()
-        if (cached.isNotEmpty()) {
-            // Serve cache immediately — zero loading delay on cold start.
-            applyItems(cached, isLoading = false)
-            repository.getSavedUri()?.let { uri ->
-                viewModelScope.launch {
-                    // Resolve observer paths and silently refresh in parallel.
-                    // startObserving() is called inside resolvePaths once folders are ready.
-                    val pathsJob   = launch { resolvePaths(uri) }
-                    val refreshJob = launch { silentFullRefresh(uri) }
-                    pathsJob.join()
-                    refreshJob.join()
-                }
+        repository.getSavedUri()?.let { savedUri ->
+            val cached = repository.getCachedStatuses()
+
+            if (cached.isNotEmpty()) {
+                // Serve cache instantly — zero UI delay on warm start
+                applyItems(cached, isLoading = false)
+            } else {
+                // No cache yet: show spinner while boot() does the initial load
+                _state.update { it.copy(isLoading = true, hasPermission = true) }
             }
-        } else {
-            repository.getSavedUri()?.let { uri ->
-                resolvePaths(uri)
-                fullLoad(uri)
-            }
+
+            viewModelScope.launch { boot(savedUri) }
         }
     }
 
     fun onPermissionGranted(uri: Uri?) {
         if (uri == null) return
         repository.persistUri(uri)
-        // Stop any existing observer before resolving new paths
+        // Clear cached folder doc IDs — a new tree URI may point to a different structure
+        repository.clearFolderDocIds()
         stopObserving()
-        resolvePaths(uri)
-        fullLoad(uri)
+        _state.update { it.copy(isLoading = true, hasPermission = true) }
+        viewModelScope.launch { boot(uri) }
     }
 
     fun openPreview(item: StatusItem)  = _state.update { it.copy(previewItem = item) }
@@ -143,18 +136,23 @@ class StatusViewModel @Inject constructor(
 
     /**
      * Manual pull-to-refresh.
-     * Both app source scans run in parallel via [async].
+     *
+     * Uses the in-memory [watchedFolders] handles for a fast refresh —
+     * one [ContentResolver.query] IPC per folder with no SAF traversal.
      */
     fun refresh() = viewModelScope.launch {
         val treeUri = repository.getSavedUri() ?: return@launch
         _state.update { it.copy(isRefreshing = true) }
 
-        val waDeferred  = async { repository.getStatusesForSource(treeUri, StatusSource.WHATSAPP) }
-        val bizDeferred = async { repository.getStatusesForSource(treeUri, StatusSource.WHATSAPP_BUSINESS) }
+        val all = if (watchedFolders.isNotEmpty()) {
+            // Fast path: one IPC per folder, no directory traversal
+            repository.getStatusesFast(watchedFolders)
+        } else {
+            // Fallback: folders not yet resolved — use full scan
+            repository.getStatuses(treeUri)
+        }
 
-        val all = waDeferred.await() + bizDeferred.await()
         applyItems(all, isLoading = false)
-        if (all.isNotEmpty()) repository.saveCache(all)
         _state.update { it.copy(isRefreshing = false) }
     }
 
@@ -170,12 +168,30 @@ class StatusViewModel @Inject constructor(
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /**
-     * Resolves [WatchedFolder] handles from [treeUri], then immediately starts the
-     * inotify observer for the VM's full lifetime regardless of which tab is active.
+     * Single entry point for all startup and permission-grant flows:
+     *
+     * 1. **Resolve folders** — reads cached folder doc IDs from SharedPrefs (zero IPC
+     *    on every launch after the first); falls back to a one-time SAF traversal
+     *    on first-ever launch or after permission is re-granted.
+     * 2. **Start inotify observer** — immediately after folders are known.
+     * 3. **Background fast refresh** — catches any statuses added or removed while
+     *    the app was closed; costs one [ContentResolver.query] IPC per folder.
      */
-    private fun resolvePaths(treeUri: Uri) = viewModelScope.launch {
-        watchedFolders = repository.resolveWatchedFolders(treeUri)
+    private suspend fun boot(treeUri: Uri) {
+        val folders = repository.resolveWatchedFolders(treeUri)
+
+        if (folders.isEmpty()) {
+            _state.update { it.copy(hasPermission = false, isLoading = false) }
+            return
+        }
+
+        watchedFolders = folders
         startObserving()
+
+        // Catch any changes that occurred while the app was closed.
+        // getStatusesFast → one ContentResolver.query IPC per folder, saves cache.
+        val all = repository.getStatusesFast(folders)
+        applyItems(all, isLoading = false)
     }
 
     /**
@@ -184,7 +200,7 @@ class StatusViewModel @Inject constructor(
      *
      * - [FolderChange.Added]   → [handleAdded]   — O(1) URI construction, prepended to state
      * - [FolderChange.Removed] → [handleRemoved] — item filtered from state by name
-     * - [FolderChange.Recheck] → debounced full re-scan (batch/untracked events only)
+     * - [FolderChange.Recheck] → debounced fast re-scan (batch/untracked events only)
      *
      * No-ops if the observer is already running or if no paths have been resolved yet.
      */
@@ -207,11 +223,17 @@ class StatusViewModel @Inject constructor(
                 }
             }
 
-            // Full re-scan for batch/untracked events — debounced
+            // Full re-scan for batch/untracked events — debounced, uses fast path
             changes
                 .filter { it is FolderChange.Recheck }
                 .debounce(RECHECK_DEBOUNCE_MS)
-                .collect { repository.getSavedUri()?.let { silentFullRefresh(it) } }
+                .collect {
+                    val folders = watchedFolders
+                    if (folders.isNotEmpty()) {
+                        val all = repository.getStatusesFast(folders)
+                        applyItems(all, isLoading = false)
+                    }
+                }
         }
     }
 
@@ -278,19 +300,6 @@ class StatusViewModel @Inject constructor(
                 }
             }
         }
-    }
-
-    /** First-time load (no cache): shows spinner, then populates state. */
-    private fun fullLoad(treeUri: Uri) = viewModelScope.launch {
-        _state.update { it.copy(isLoading = true, hasPermission = true) }
-        val all = repository.getStatuses(treeUri)
-        applyItems(all, isLoading = false)
-    }
-
-    /** Background re-scan — no spinner, applies result regardless of empty/non-empty. */
-    private suspend fun silentFullRefresh(treeUri: Uri) {
-        val all = repository.getStatuses(treeUri)
-        applyItems(all, isLoading = false)
     }
 
     private fun applyItems(all: List<StatusItem>, isLoading: Boolean) {

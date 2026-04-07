@@ -16,7 +16,6 @@ import com.lhacenmed.budget.data.model.StatusSource
 import com.lhacenmed.budget.data.util.WatchedFolder
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -43,11 +42,33 @@ class StatusSaverRepository @Inject constructor(
 
     fun clearUri() = prefs.edit { remove(KEY_URI) }
 
-    // ── Cache ─────────────────────────────────────────────────────────────────
+    // ── Folder doc ID cache ───────────────────────────────────────────────────
+    //
+    // After the first SAF traversal we persist each app's `.Statuses` folder
+    // document ID. On every subsequent launch we reconstruct [WatchedFolder]s
+    // from these IDs with zero binder IPC — pure string arithmetic on the
+    // cached value and the tree URI.
+
+    private fun getFolderDocId(source: StatusSource): String? =
+        prefs.getString(folderDocIdKey(source), null)
+
+    private fun saveFolderDocId(source: StatusSource, docId: String) =
+        prefs.edit { putString(folderDocIdKey(source), docId) }
+
+    /** Clears only the folder doc IDs — called when a new tree URI is granted. */
+    fun clearFolderDocIds() = prefs.edit {
+        remove(KEY_DOC_ID_WA)
+        remove(KEY_DOC_ID_BIZ)
+    }
+
+    private fun folderDocIdKey(source: StatusSource) =
+        if (source == StatusSource.WHATSAPP) KEY_DOC_ID_WA else KEY_DOC_ID_BIZ
+
+    // ── Status list cache ─────────────────────────────────────────────────────
 
     /**
      * Returns the last successfully scanned list from SharedPreferences.
-     * Synchronous and fast — safe to call on the main thread during VM init.
+     * Synchronous — safe to call on the main thread during VM init.
      */
     fun getCachedStatuses(): List<StatusItem> {
         val json = prefs.getString(KEY_CACHE, null) ?: return emptyList()
@@ -66,8 +87,8 @@ class StatusSaverRepository @Inject constructor(
     }
 
     /**
-     * Persists [items] to SharedPreferences so the next cold start is instant.
-     * Called after every successful SAF scan.
+     * Persists [items] to SharedPreferences so the next cold start shows
+     * content instantly with no loading delay.
      */
     internal fun saveCache(items: List<StatusItem>) {
         val array = JSONArray()
@@ -84,50 +105,117 @@ class StatusSaverRepository @Inject constructor(
 
     private fun clearCache() = prefs.edit { remove(KEY_CACHE) }
 
-    // ── Folder resolution for FileObserver ────────────────────────────────────
+    // ── Folder resolution ─────────────────────────────────────────────────────
 
     /**
      * Resolves [WatchedFolder] handles for each app's `.Statuses` directory.
      *
-     * Each handle carries:
-     * - [WatchedFolder.realPath]    — real filesystem path for [android.os.FileObserver]
-     * - [WatchedFolder.folderDocId] — SAF document ID used for O(1) child URI construction
-     * - [WatchedFolder.treeUri]     — the granted tree URI base
+     * **Fast path** (every launch after the first): reads persisted folder doc IDs
+     * from SharedPreferences and constructs [WatchedFolder]s with zero SAF I/O.
      *
-     * SAF document IDs for primary storage follow the pattern:
-     *   `primary:Android/media/com.whatsapp/WhatsApp/Media/.Statuses`
-     * which maps to:
-     *   `/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/.Statuses`
+     * **Slow path** (first-ever launch or after permission is re-granted): performs
+     * a one-time recursive SAF traversal to locate the `.Statuses` directories.
+     * Discovered doc IDs are immediately persisted so the fast path is taken on
+     * every subsequent boot.
      */
     suspend fun resolveWatchedFolders(treeUri: Uri): List<WatchedFolder> =
         withContext(Dispatchers.IO) {
-            try {
-                val root    = DocumentFile.fromTreeUri(context, treeUri)
-                    ?: return@withContext emptyList()
-                val folders = mutableListOf<WatchedFolder>()
+            val waDocId  = getFolderDocId(StatusSource.WHATSAPP)
+            val bizDocId = getFolderDocId(StatusSource.WHATSAPP_BUSINESS)
 
+            // Fast path: reconstruct handles from cached doc IDs, zero IPC
+            if (waDocId != null || bizDocId != null) {
+                return@withContext buildList {
+                    waDocId?.toWatchedFolder(treeUri, StatusSource.WHATSAPP)?.let(::add)
+                    bizDocId?.toWatchedFolder(treeUri, StatusSource.WHATSAPP_BUSINESS)?.let(::add)
+                }
+            }
+
+            // Slow path: first launch — traverse and persist discovered doc IDs
+            traverseAndResolve(treeUri)
+        }
+
+    /**
+     * Full recursive SAF traversal to locate `.Statuses` directories.
+     * Persists discovered folder doc IDs immediately so [resolveWatchedFolders]
+     * uses the fast path on every subsequent launch.
+     */
+    private fun traverseAndResolve(treeUri: Uri): List<WatchedFolder> = try {
+        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
+        buildList {
+            listOf(
+                PACKAGE_WHATSAPP          to StatusSource.WHATSAPP,
+                PACKAGE_WHATSAPP_BUSINESS to StatusSource.WHATSAPP_BUSINESS
+            ).forEach { (pkg, source) ->
+                val appDir       = root.findFile(pkg) ?: return@forEach
+                val statusFolder = findStatusesFolder(appDir, depth = 0) ?: return@forEach
+                val folderDocId  = DocumentsContract.getDocumentId(statusFolder.uri)
+                val realPath     = documentUriToPath(statusFolder.uri) ?: return@forEach
+                saveFolderDocId(source, folderDocId)
+                add(WatchedFolder(realPath, source, folderDocId, treeUri))
+            }
+        }
+    } catch (_: Exception) { emptyList() }
+
+    // ── Status reading ────────────────────────────────────────────────────────
+
+    /**
+     * Fast status listing using in-memory [WatchedFolder] handles.
+     *
+     * Issues a single [ContentResolver.query] per folder ([buildChildDocumentsUriUsingTree])
+     * instead of one binder IPC per file as [DocumentFile.listFiles] does.
+     * Cost: O(1) IPC per folder regardless of how many files are present.
+     *
+     * Used by pull-to-refresh and the background boot refresh.
+     * Saves the result to cache automatically when non-empty.
+     */
+    suspend fun getStatusesFast(folders: List<WatchedFolder>): List<StatusItem> =
+        withContext(Dispatchers.IO) {
+            folders.flatMap { folder ->
+                queryStatusItems(folder.treeUri, folder.folderDocId, folder.source)
+            }.also { if (it.isNotEmpty()) saveCache(it) }
+        }
+
+    /**
+     * Full scan for both WhatsApp variants.
+     * Uses cached folder doc IDs when available; falls back to SAF traversal per-source.
+     *
+     * Primarily used by [getStatuses] when [getStatusesFast] is not yet available
+     * (i.e., before [resolveWatchedFolders] has been called).
+     */
+    suspend fun getStatuses(treeUri: Uri): List<StatusItem> = withContext(Dispatchers.IO) {
+        try {
+            buildList {
                 listOf(
                     PACKAGE_WHATSAPP          to StatusSource.WHATSAPP,
                     PACKAGE_WHATSAPP_BUSINESS to StatusSource.WHATSAPP_BUSINESS
                 ).forEach { (pkg, source) ->
-                    val appDir       = root.findFile(pkg) ?: return@forEach
-                    val statusFolder = findStatusesFolder(appDir, depth = 0) ?: return@forEach
-                    val realPath     = documentUriToPath(statusFolder.uri) ?: return@forEach
-                    val folderDocId  = DocumentsContract.getDocumentId(statusFolder.uri)
-                    folders += WatchedFolder(realPath, source, folderDocId, treeUri)
+                    val cachedDocId = getFolderDocId(source)
+                    if (cachedDocId != null) {
+                        // Fast path: doc ID already known
+                        addAll(queryStatusItems(treeUri, cachedDocId, source))
+                    } else {
+                        // Slow path: traverse this source, cache its doc ID for next time
+                        val root   = DocumentFile.fromTreeUri(context, treeUri) ?: return@forEach
+                        val appDir = root.findFile(pkg) ?: return@forEach
+                        addAll(scanAppDir(appDir, source, treeUri))
+                    }
                 }
-                folders
-            } catch (_: Exception) { emptyList() }
+            }.also { if (it.isNotEmpty()) saveCache(it) }
+        } catch (_: Exception) {
+            clearUri()
+            clearCache()
+            clearFolderDocIds()
+            emptyList()
         }
+    }
 
     /**
-     * Constructs a [StatusItem] for a single newly-detected file using only SAF string math —
-     * no I/O, no directory listing.
+     * Constructs a [StatusItem] for a single newly-detected file with zero I/O —
+     * pure [DocumentsContract] string math on [WatchedFolder.folderDocId] + [fileName].
      *
-     * Child document IDs follow the `ExternalStorageProvider` convention:
-     *   `{parentDocId}/{fileName}`  →  `primary:Android/media/…/.Statuses/filename.jpg`
-     *
-     * Returns null if [fileName] is not a recognised media extension (e.g. a `.tmp` temp file).
+     * Used by the real-time [com.lhacenmed.budget.data.util.FolderChange.Added] handler.
+     * Returns null for unrecognised extensions (e.g. `.tmp` temp files).
      */
     fun resolveSingleStatus(folder: WatchedFolder, fileName: String): StatusItem? {
         if (!fileName.isImage() && !fileName.isVideo()) return null
@@ -142,86 +230,6 @@ class StatusSaverRepository @Inject constructor(
             source  = folder.source
         )
     }
-
-    // ── Read statuses ─────────────────────────────────────────────────────────
-
-    /**
-     * Full scan of both [PACKAGE_WHATSAPP] and [PACKAGE_WHATSAPP_BUSINESS] under [treeUri].
-     *
-     * Both app subtrees are scanned in parallel via [async] — wall-clock time is
-     * determined by the slower of the two scans rather than their sum.
-     * Dispatched to [Dispatchers.IO]. Saves result to cache on success.
-     */
-    suspend fun getStatuses(treeUri: Uri): List<StatusItem> = withContext(Dispatchers.IO) {
-        try {
-            val root = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
-
-            // Launch both subtree scans concurrently
-            val waDeferred  = async { root.findFile(PACKAGE_WHATSAPP)?.let          { readFromAppRoot(it, StatusSource.WHATSAPP)          } ?: emptyList() }
-            val bizDeferred = async { root.findFile(PACKAGE_WHATSAPP_BUSINESS)?.let { readFromAppRoot(it, StatusSource.WHATSAPP_BUSINESS) } ?: emptyList() }
-
-            val all = waDeferred.await() + bizDeferred.await()
-            if (all.isNotEmpty()) saveCache(all)
-            all
-        } catch (_: Exception) {
-            clearUri()
-            clearCache()
-            emptyList()
-        }
-    }
-
-    /**
-     * Partial scan — only the folder belonging to [source].
-     * Used by [com.lhacenmed.budget.ui.page.status.StatusViewModel.refresh]
-     * for parallel manual pull-to-refresh.
-     */
-    suspend fun getStatusesForSource(treeUri: Uri, source: StatusSource): List<StatusItem> =
-        withContext(Dispatchers.IO) {
-            try {
-                val root   = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
-                val pkg    = if (source == StatusSource.WHATSAPP) PACKAGE_WHATSAPP else PACKAGE_WHATSAPP_BUSINESS
-                val appDir = root.findFile(pkg) ?: return@withContext emptyList()
-                readFromAppRoot(appDir, source)
-            } catch (_: Exception) { emptyList() }
-        }
-
-    /**
-     * Finds the `.Statuses` folder within an app's media directory,
-     * then reads and returns all valid status files from it.
-     */
-    private fun readFromAppRoot(appDir: DocumentFile, source: StatusSource): List<StatusItem> {
-        val statusesFolder = findStatusesFolder(appDir, depth = 0) ?: return emptyList()
-        return readStatusFiles(statusesFolder, source)
-    }
-
-    /**
-     * Recursively searches for a folder named ".Statuses" up to [MAX_SCAN_DEPTH] levels deep.
-     * Returns the folder if found, null otherwise.
-     */
-    private fun findStatusesFolder(dir: DocumentFile, depth: Int): DocumentFile? {
-        if (depth > MAX_SCAN_DEPTH) return null
-        for (file in dir.listFiles()) {
-            if (file.isDirectory) {
-                if (file.name == STATUSES_FOLDER_NAME) return file
-                val found = findStatusesFolder(file, depth + 1)
-                if (found != null) return found
-            }
-        }
-        return null
-    }
-
-    private fun readStatusFiles(folder: DocumentFile, source: StatusSource): List<StatusItem> =
-        folder.listFiles()
-            .filter { it.isFile && it.name != null }
-            .mapNotNull { file ->
-                val name = file.name ?: return@mapNotNull null
-                when {
-                    name.isImage() -> StatusItem(file.uri, name, isVideo = false, source = source)
-                    name.isVideo() -> StatusItem(file.uri, name, isVideo = true,  source = source)
-                    else           -> null
-                }
-            }
-            .sortedByDescending { it.name }
 
     // ── Save to gallery ───────────────────────────────────────────────────────
 
@@ -261,10 +269,79 @@ class StatusSaverRepository @Inject constructor(
         } catch (_: Exception) { false }
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Private helpers ───────────────────────────────────────────────────────
 
     /**
-     * Converts a SAF document URI to its real filesystem path.
+     * Issues a single [ContentResolver.query] for all children of [folderDocId].
+     *
+     * [DocumentsContract.buildChildDocumentsUriUsingTree] + [ContentResolver.query]
+     * costs **one binder IPC** regardless of file count.
+     * [DocumentFile.listFiles] costs **one IPC per file** — O(N) vs O(1).
+     */
+    private fun queryStatusItems(
+        treeUri:     Uri,
+        folderDocId: String,
+        source:      StatusSource
+    ): List<StatusItem> {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, folderDocId)
+        val cursor = context.contentResolver.query(
+            childrenUri,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE
+            ),
+            null, null, null
+        ) ?: return emptyList()
+
+        return cursor.use { c ->
+            buildList {
+                while (c.moveToNext()) {
+                    val name = c.getString(1) ?: continue
+                    val mime = c.getString(2) ?: continue
+                    if (mime == DocumentsContract.Document.MIME_TYPE_DIR) continue
+                    if (!name.isImage() && !name.isVideo()) continue
+                    val docId = c.getString(0)
+                    val uri   = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                    add(StatusItem(uri, name, name.isVideo(), source))
+                }
+            }.sortedByDescending { it.name }
+        }
+    }
+
+    /**
+     * SAF traversal fallback: locates `.Statuses` inside [appDir], persists its doc ID,
+     * then lists files via [queryStatusItems] (single IPC, not one per file).
+     */
+    private fun scanAppDir(
+        appDir:  DocumentFile,
+        source:  StatusSource,
+        treeUri: Uri
+    ): List<StatusItem> {
+        val folder = findStatusesFolder(appDir, depth = 0) ?: return emptyList()
+        val docId  = DocumentsContract.getDocumentId(folder.uri)
+        saveFolderDocId(source, docId)
+        return queryStatusItems(treeUri, docId, source)
+    }
+
+    /**
+     * Recursively searches for a folder named [STATUSES_FOLDER_NAME] up to
+     * [MAX_SCAN_DEPTH] levels deep. Only called on first launch per source.
+     */
+    private fun findStatusesFolder(dir: DocumentFile, depth: Int): DocumentFile? {
+        if (depth > MAX_SCAN_DEPTH) return null
+        for (file in dir.listFiles()) {
+            if (file.isDirectory) {
+                if (file.name == STATUSES_FOLDER_NAME) return file
+                val found = findStatusesFolder(file, depth + 1)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    /**
+     * Converts a SAF document URI to its real filesystem path for [android.os.FileObserver].
      *
      * External storage document IDs are formatted as `volume:relative/path`.
      * "primary" maps to `/storage/emulated/0`; other volumes use `/storage/<volumeId>`.
@@ -277,6 +354,17 @@ class StatusSaverRepository @Inject constructor(
         else "/storage/${parts[0]}/${parts[1]}"
     } catch (_: Exception) { null }
 
+    /**
+     * Reconstructs a [WatchedFolder] from a cached folder doc ID.
+     * Returns null if the doc ID cannot be resolved to a real filesystem path —
+     * this is pure string arithmetic with zero IPC.
+     */
+    private fun String.toWatchedFolder(treeUri: Uri, source: StatusSource): WatchedFolder? {
+        val docUri   = DocumentsContract.buildDocumentUriUsingTree(treeUri, this)
+        val realPath = documentUriToPath(docUri) ?: return null
+        return WatchedFolder(realPath, source, this, treeUri)
+    }
+
     private fun String.isImage() = endsWith(".jpg", true) || endsWith(".jpeg", true) ||
             endsWith(".png", true) || endsWith(".webp", true)
 
@@ -284,8 +372,11 @@ class StatusSaverRepository @Inject constructor(
             endsWith(".mkv", true)
 
     companion object {
-        private const val KEY_URI                   = "tree_uri"
-        private const val KEY_CACHE                 = "statuses_cache"
+        private const val KEY_URI        = "tree_uri"
+        private const val KEY_CACHE      = "statuses_cache"
+        private const val KEY_DOC_ID_WA  = "folder_doc_id_wa"
+        private const val KEY_DOC_ID_BIZ = "folder_doc_id_biz"
+
         private const val STATUSES_FOLDER_NAME      = ".Statuses"
         private const val MAX_SCAN_DEPTH            = 4
         private const val PACKAGE_WHATSAPP          = "com.whatsapp"
